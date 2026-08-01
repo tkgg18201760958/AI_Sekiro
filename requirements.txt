@@ -1,0 +1,10 @@
+mss==10.2.0
+opencv-python==5.0.0.93
+pygetwindow==0.0.9
+pywin32==312
+numpy==2.5.1
+PyYAML==6.0.2
+pydirectinput==1.0.4
+gymnasium==1.2.1
+stable-baselines3==2.7.0
+tensorboard==2.20.0

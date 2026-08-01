@@ -1,0 +1,74 @@
+# Global config: key mappings, reward weights, training hyperparameters.
+# Every module reads its own top-level section via
+# sekiro_ai.utils.config_loader.load_config(); keep unrelated settings under
+# their own key so modules stay independent of each other.
+
+controller:
+  # Action name (lowercase, matches sekiro_ai.controller.Action member names)
+  # -> input spec. Missing entries fall back to
+  # sekiro_ai.controller.action_map.DEFAULT_KEYMAP, so you only need to list
+  # the actions you want to remap from the default.
+  keymap:
+    wait:
+      type: none
+    attack:
+      type: mouse
+      button: left
+    guard:
+      type: mouse
+      button: right
+    parry:
+      type: mouse
+      button: right
+      duration: 0.08
+    dodge_left:
+      type: combo
+      keys: [shift, a]
+      duration: 0.15
+    dodge_right:
+      type: combo
+      keys: [shift, d]
+      duration: 0.15
+    backstep:
+      type: combo
+      keys: [shift, s]
+      duration: 0.15
+
+calibration:
+  # Real-game pixel calibration (sekiro_ai.state_reader.pixel_reader).
+  # PixelStateReader.read() raises NotImplementedError until these are
+  # filled in against an actual running game window -- see
+  # docs/roadmap.md stage 8 and docs/risks.md for why this can't be done
+  # without the game open. Fields left null/empty are what remains manual:
+  #   1. Launch Sekiro at a known resolution (recommended: 1920x1080 borderless).
+  #   2. Screenshot the HUD and measure each bar's pixel rect relative to
+  #      the game window's client area: player_hp_bar, player_posture_bar,
+  #      boss_hp_bar, boss_posture_bar -> [x, y, width, height].
+  #   3. Sample the bar-fill color at both "full" and "empty" to get a
+  #      color threshold (HSV range) that OpenCV can mask reliably.
+  #   4. Capture a template crop of the "危" (perilous attack) icon for
+  #      cv2.matchTemplate-based boss_action detection.
+  # None of this is guessable from code; it must be measured against the
+  # live game and pasted in here.
+  resolution: null            # e.g. [1920, 1080]
+  player_hp_bar: null         # [x, y, width, height]
+  player_posture_bar: null
+  boss_hp_bar: null
+  boss_posture_bar: null
+  perilous_icon_template: null   # path to a saved template image, e.g. assets/perilous_icon.png
+  hp_color_hsv_range: null       # e.g. [[0, 120, 70], [10, 255, 255]]
+
+reward:
+  # Weight name -> value. Missing entries fall back to
+  # sekiro_ai.reward.reward_calculator.DEFAULT_WEIGHTS. Tune these based on
+  # tests/test_reward.py output and, later, observed training behavior
+  # (e.g. if the agent learns to stall, increase the magnitude of `step`).
+  weights:
+    boss_hp_delta: 100.0
+    player_hp_delta: 100.0
+    boss_posture_delta: 20.0
+    player_posture_delta: 20.0
+    player_hit: -5.0
+    boss_dead: 500.0
+    player_dead: -500.0
+    step: -0.01
