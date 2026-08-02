@@ -1,4 +1,4 @@
 from .factory import build_env, build_reader
-from .sekiro_env import OBS_DIM, SekiroEnv
+from .sekiro_env import SekiroEnv
 
-__all__ = ["SekiroEnv", "OBS_DIM", "build_env", "build_reader"]
+__all__ = ["SekiroEnv", "build_env", "build_reader"]
