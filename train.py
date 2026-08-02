@@ -62,7 +62,7 @@ def main() -> None:
         logger.info("Resuming training from %s", args.resume_from)
         model = PPO.load(args.resume_from, env=env, tensorboard_log=str(TENSORBOARD_DIR))
     else:
-        model = PPO("MlpPolicy", env, verbose=1, seed=args.seed, tensorboard_log=str(TENSORBOARD_DIR))
+        model = PPO("CnnPolicy", env, verbose=1, seed=args.seed, tensorboard_log=str(TENSORBOARD_DIR))
 
     logger.info(
         "Starting PPO training: total_timesteps=%d run_name=%s live=%s mode=%s",

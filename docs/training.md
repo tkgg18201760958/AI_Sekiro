@@ -31,7 +31,7 @@ python train.py --live --total-timesteps 200000 --run-name live_run
 
 1. 构建环境（`build_env`），根据 `--live`/`--mode` 决定用 `PixelStateReader` 还是 `MockStateReader`。
 2. 用 `stable_baselines3.common.monitor.Monitor` 包一层环境，专门用来在每个episode结束时收集这一整局的统计数据（步数、总reward），并通过 `info_keywords=("state",)` 把最后一步的完整状态字典也带出来（供CSV记录死亡原因用）。
-3. 创建（或加载）PPO模型，`policy="MlpPolicy"`（状态是低维数值向量，不需要卷积网络处理图像）。
+3. 创建（或加载）PPO模型，`policy="CnnPolicy"`（观测是堆叠的灰度图像帧，`stable-baselines3` 会自动为这个图像 `Box` 空间构建默认的 `NatureCNN` 特征提取器）。
 4. 调用 `model.learn(total_timesteps=..., callback=episode_logger)` 开始训练，`episode_logger` 是自定义的 `EpisodeCsvLogger`（见下方"episode记录"）。
 5. 训练结束后（或被 Ctrl+C 中断）会走到 `finally` 块，**保证模型一定会被保存一次**。
 
