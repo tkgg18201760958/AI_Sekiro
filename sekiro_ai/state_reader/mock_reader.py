@@ -14,8 +14,22 @@ import random
 import time
 from typing import List
 
+import numpy as np
+
 from .base import StateReader
+from .observation_config import ObservationConfig
 from .schema import GameState
+from ..utils.config_loader import load_config
+
+# 要绘制的血条 rect，键名与 config.yaml 的 calibration 部分中使用的名称
+# 一致，值是每个 rect 的填充比例应该跟踪的 GameState 属性名。顺序无关紧要，
+# 各自独立绘制。
+_BAR_SPECS = (
+    ("player_hp_bar", "player_hp"),
+    ("player_posture_bar", "player_posture"),
+    ("boss_hp_bar", "boss_hp"),
+    ("boss_posture_bar", "boss_posture"),
+)
 
 # Each scripted phase describes the *target* values the state should move
 # towards, plus the boss_action for that phase, and how many read() calls to
@@ -76,6 +90,31 @@ class MockStateReader(StateReader):
         self._state.timestamp = time.time()
         return self._state
 
+    def read_frame(self) -> np.ndarray:
+        """合成的、大约 84x84 大小的灰度帧：把 config.yaml 的 calibration
+        部分中的 4 个血条 rect（从它们原生的 calibration.resolution 缩放
+        到 ObservationConfig.frame_size）绘制成水平色条，其填充宽度对应
+        相应的 GameState 字段。这样 mock 模式下的预览图像在视觉位置上
+        就能和 PixelStateReader 最终从真实游戏窗口截取到的图像保持一致，
+        符合设计文档里对 mock 图像的要求。"""
+        obs_cfg = ObservationConfig.from_config()
+        width, height = obs_cfg.frame_size
+        frame = np.zeros((height, width), dtype=np.uint8)
+
+        calibration = load_config().get("calibration", {})
+        resolution = calibration.get("resolution") or [1280, 720]
+
+        for rect_key, state_attr in _BAR_SPECS:
+            rect = calibration.get(rect_key)
+            if not rect:
+                continue
+            x, y, w, h = _scale_rect(rect, resolution, obs_cfg.frame_size)
+            fill_ratio = max(0.0, min(1.0, getattr(self._state, state_attr)))
+            filled_w = max(1, int(w * fill_ratio))
+            frame[y : y + h, x : x + filled_w] = 200
+
+        return frame
+
     def _advance_scripted(self) -> None:
         phase = _SCRIPTED_PHASES[self._phase_idx]
 
@@ -122,3 +161,22 @@ class MockStateReader(StateReader):
 
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
+
+
+def _scale_rect(
+    rect: list[int], from_size: list[int], to_size: tuple[int, int]
+) -> tuple[int, int, int, int]:
+    """把一个在 `from_size` 分辨率下测得的 [x, y, w, h] 像素 rect
+    映射到 `to_size` 的画布上，宽/高至少钳制为 1px，这样一个很小的
+    目标画布（比如 84x84）永远不会产生面积为零的 rect。"""
+    x, y, w, h = rect
+    from_w, from_h = from_size
+    to_w, to_h = to_size
+    scale_x = to_w / from_w
+    scale_y = to_h / from_h
+    return (
+        int(x * scale_x),
+        int(y * scale_y),
+        max(1, int(w * scale_x)),
+        max(1, int(h * scale_y)),
+    )

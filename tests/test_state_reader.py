@@ -14,6 +14,7 @@ dies.
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -24,6 +25,8 @@ from sekiro_ai.state_reader import MockStateReader, StateReader
 from sekiro_ai.utils.logging_setup import get_logger
 
 logger = get_logger("state_reader", "state_reader.log")
+
+FRAME_PREVIEW_DIR = Path(__file__).resolve().parent.parent / "logs" / "frame_preview"
 
 
 def build_reader(live: bool, mode: str, seed: int | None) -> StateReader:
@@ -54,6 +57,20 @@ def format_state(state) -> str:
     )
 
 
+def save_frame_previews(reader, n: int) -> None:
+    import cv2
+
+    if FRAME_PREVIEW_DIR.exists():
+        shutil.rmtree(FRAME_PREVIEW_DIR)
+    FRAME_PREVIEW_DIR.mkdir(parents=True)
+
+    for i in range(n):
+        frame = reader.read_frame()
+        path = FRAME_PREVIEW_DIR / f"frame_{i:03d}.png"
+        cv2.imwrite(str(path), frame)
+    logger.info("Saved %d frame(s) to %s", n, FRAME_PREVIEW_DIR)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Test the State Reader module.")
     parser.add_argument("--live", action="store_true", help="Try a real PixelStateReader before falling back to mock.")
@@ -61,6 +78,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=40, help="Number of read() calls to perform.")
     parser.add_argument("--interval", type=float, default=0.15, help="Seconds to sleep between reads.")
     parser.add_argument("--seed", type=int, default=None, help="RNG seed for reproducible mock output.")
+    parser.add_argument("--save-frames", type=int, default=0, help="Save N read_frame() outputs as PNGs to logs/frame_preview/ for visual inspection.")
     args = parser.parse_args()
 
     reader = build_reader(args.live, args.mode, args.seed)
@@ -68,6 +86,9 @@ def main() -> None:
 
     if hasattr(reader, "reset"):
         reader.reset()
+
+    if args.save_frames > 0:
+        save_frame_previews(reader, args.save_frames)
 
     try:
         for i in range(args.steps):

@@ -59,6 +59,19 @@ calibration:
   boss_posture_bar: [580, 40, 119, 10]    # top-center yellow chevron bar (excludes the "<"/">" side markers)
   perilous_icon_template: null   # path to a saved template image, e.g. assets/perilous_icon.png -- BOSS.png doesn't show a "危" prompt, so this still needs a screenshot taken during a perilous attack
   hp_color_hsv_range: [[0, 100, 90], [10, 255, 255]]   # covers both the boss's dark red and the player's lighter salmon fill
+  posture_color_hsv_range: [[15, 80, 80], [35, 255, 255]]   # 黄色箭头架势条填充色，与上面红/橙的 HP 条区分开
+
+observation:
+  # 喂给 PPO agent 的像素帧观测形状（sekiro_ai.state_reader.observation_config）。
+  # frame_size：堆叠前单帧 resize 的目标尺寸 [width, height]。
+  # frame_skip：每隔 N 个环境步骤才采样一个新帧入栈（在此期间，
+  #   最近入栈的帧会重复）——在 60fps 下，这样能让堆栈的时间窗口
+  #   足够宽以体现出运动，而不是 4 张几乎一样的帧。
+  # stack_size：滑动窗口中保留的帧数；observation 的形状为
+  #   (frame_size[1], frame_size[0], stack_size)。
+  frame_size: [84, 84]
+  frame_skip: 4
+  stack_size: 4
 
 reward:
   # Weight name -> value. Missing entries fall back to

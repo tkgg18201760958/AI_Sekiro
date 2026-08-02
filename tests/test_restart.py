@@ -57,6 +57,10 @@ class ScriptedDeathReader(StateReader):
         self._reads = 0
         return GameState(timestamp=time.time())
 
+    def read_frame(self):
+        import numpy as np
+        return np.zeros((84, 84), dtype=np.uint8)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Test the Restart Manager module.")

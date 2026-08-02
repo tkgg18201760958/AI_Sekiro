@@ -20,9 +20,13 @@ fall back to `MockStateReader` rather than silently getting wrong data.
 from __future__ import annotations
 
 import logging
+import time
+
+import numpy as np
 
 from ..utils.config_loader import load_config
 from .base import StateReader
+from .observation_config import ObservationConfig
 from .schema import GameState
 
 logger = logging.getLogger(__name__)
@@ -95,17 +99,82 @@ class PixelStateReader(StateReader):
                 "it cannot be filled in from code. Use MockStateReader "
                 "until calibration is done."
             )
-        raise NotImplementedError(
-            "Calibration values are present but the screenshot/color-mask "
-            "reading pipeline (mss capture + OpenCV bar-fill measurement) "
-            "is not implemented yet. Use MockStateReader for now."
+
+        image = capture_client_area(self._window)
+        hp_range = self.calibration.get("hp_color_hsv_range") or [[0, 100, 90], [10, 255, 255]]
+        posture_range = self.calibration.get("posture_color_hsv_range") or [[15, 80, 80], [35, 255, 255]]
+
+        player_hp = bar_fill_ratio(image, tuple(self.calibration["player_hp_bar"]), hp_range)
+        boss_hp = bar_fill_ratio(image, tuple(self.calibration["boss_hp_bar"]), hp_range)
+        player_posture = bar_fill_ratio(image, tuple(self.calibration["player_posture_bar"]), posture_range)
+        boss_posture = bar_fill_ratio(image, tuple(self.calibration["boss_posture_bar"]), posture_range)
+
+        return GameState(
+            player_hp=player_hp,
+            boss_hp=boss_hp,
+            player_posture=player_posture,
+            boss_posture=boss_posture,
+            player_dead=player_hp <= 0.01,
+            boss_dead=boss_hp <= 0.01,
+            timestamp=time.time(),
         )
+
+    def read_frame(self) -> np.ndarray:
+        if not self.is_available():
+            raise RuntimeError(
+                f"PixelStateReader could not find a window owned by {self.process_name!r}."
+            )
+        import cv2
+
+        obs_cfg = ObservationConfig.from_config()
+        image = capture_client_area(self._window)
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        return cv2.resize(gray, obs_cfg.frame_size, interpolation=cv2.INTER_AREA)
 
     def close(self) -> None:
         if self._sct is not None:
             self._sct.close()
         self._sct = None
         self._window = None
+
+
+def bar_fill_ratio(bgr_image, rect: tuple[int, int, int, int], hsv_range) -> float:
+    """`rect` 的宽度中，在其高度范围内至少有一个像素匹配 `hsv_range`
+    （一对 OpenCV-HSV 的 [[H,S,V]min, [H,S,V]max]）的比例——这是一种
+    对水平血条填充比例的估算方式，对血条填充色在亮度/明暗上的轻微变化
+    比较鲁棒（每一列只需要有一个匹配的像素，不要求整列都匹配）。"""
+    import cv2
+    import numpy as np
+
+    x, y, w, h = rect
+    roi = bgr_image[y : y + h, x : x + w]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    lo, hi = np.array(hsv_range[0]), np.array(hsv_range[1])
+    mask = cv2.inRange(hsv, lo, hi)
+    if mask.shape[1] == 0:
+        return 0.0
+    column_has_fill = (mask > 0).any(axis=0)
+    return float(column_has_fill.mean())
+
+
+def capture_client_area(window):
+    """截取 `window` 客户区（不包括标题栏/边框）的截图，返回 BGR
+    ndarray，使用该窗口当前在屏幕上的位置（通过 win32gui.ClientToScreen）
+    和尺寸（通过 win32gui.GetClientRect）。"""
+    import cv2
+    import mss
+    import numpy as np
+    import win32gui
+
+    hwnd = window._hWnd
+    left, top, right, bottom = win32gui.GetClientRect(hwnd)
+    screen_x, screen_y = win32gui.ClientToScreen(hwnd, (left, top))
+    width, height = right - left, bottom - top
+
+    with mss.mss() as sct:
+        shot = sct.grab({"left": screen_x, "top": screen_y, "width": width, "height": height})
+    bgra = np.array(shot)
+    return cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
 
 
 def _process_exe_name(pid: int) -> str | None:

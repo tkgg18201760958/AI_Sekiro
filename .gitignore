@@ -9,3 +9,6 @@ logs/episodes/*.csv
 logs/tensorboard/
 
 .playwright-mcp/
+
+# subagent-driven-development scratch workspace (ledger, briefs, reports)
+.superpowers/

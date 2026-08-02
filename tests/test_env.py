@@ -15,6 +15,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sekiro_ai.controller import InputController
@@ -67,6 +69,12 @@ def run_manual_episodes(episodes: int, steps: int, seed: int | None) -> None:
         for ep in range(episodes):
             obs, info = env.reset(seed=seed)
             logger.info("episode=%d reset obs.shape=%s", ep, obs.shape)
+            expected_shape = env.observation_space.shape
+            if obs.shape != expected_shape or obs.dtype != np.uint8:
+                logger.error(
+                    "episode=%d FAIL: obs.shape=%s dtype=%s, expected shape=%s dtype=uint8",
+                    ep, obs.shape, obs.dtype, expected_shape,
+                )
             total_reward = 0.0
             for t in range(steps):
                 action = env.action_space.sample()

@@ -4,7 +4,7 @@
 
 - **操作系统**：Windows。真实游戏对接依赖 `pydirectinput`（DirectInput 键鼠模拟）和 `pywin32`/`pygetwindow`（定位游戏窗口），这些库只支持 Windows。mock 模式（不涉及真实键鼠/截图）理论上可以在其他系统上跑，但项目没有在非 Windows 上测试过。
 - **Python**：3.11 及以上，已在 3.13 上验证过。
-- 不需要提前安装 CUDA/GPU 相关依赖，`stable-baselines3` 的 `MlpPolicy` 在 CPU 上跑训练完全够用（状态是13维向量，不是图像，不需要卷积网络）。
+- 不需要提前安装 CUDA/GPU 相关依赖。观测现在是 `84x84` 灰度图像堆叠，`stable-baselines3` 的 `CnnPolicy` 会用它默认的 `NatureCNN` 提取特征，但图像尺寸小、episode 也不长，CPU 上跑训练依然完全够用，不需要额外配 GPU。
 
 ## 安装步骤
 
@@ -53,6 +53,10 @@ python tests/test_restart.py
 python tests/test_reward.py
 python tests/test_env.py
 python tests/test_random_agent.py
+python tests/test_frame_stack.py            # FrameStack 帧堆叠/frame_skip 逻辑
+python tests/test_observation_config.py     # ObservationConfig 读取 config.yaml 的 observation 配置
+python tests/test_mock_frame.py             # MockStateReader.read_frame() 合成血条画面
+python tests/test_pixel_bar_extraction.py   # PixelStateReader 血条/架势条提取，对着 GAME_PIC/ 静态截图跑，不需要打开游戏
 ```
 
 全部正常跑完（没有报错退出）说明环境没问题。接下来可以直接开始训练（见 [training.md](training.md)），或者先看 [configuration.md](configuration.md) 了解可调参数。

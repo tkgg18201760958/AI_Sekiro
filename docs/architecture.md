@@ -81,6 +81,8 @@ AI_Sekiro/
 }
 ```
 
+> **注意**：这个状态字典现在只供 `RewardCalculator` 和 `RestartManager` 使用（计算 reward、判断死亡/重开），**不再是 agent 的观测**。agent 的观测是堆叠的灰度像素帧（形状见 [configuration.md](configuration.md) 的"`observation` —— 像素帧观测形状"一节），由 `SekiroEnv`/`FrameStack` 独立于这份状态字典单独产出。
+
 ## 3. 模块间数据流
 
 单个 step 循环：
@@ -91,7 +93,7 @@ StateReader.read() -> state(t)
         ▼
 RewardCalculator.compute(state(t-1), state(t)) -> reward
         │
-SekiroEnv 组装 observation (state(t) 转成 np.array)
+SekiroEnv 组装 observation：reader.read_frame() 取得画面像素帧 -> FrameStack 堆叠成 (H, W, stack_size) 灰度帧堆栈（与 state(t) 无关，state(t) 只流向 reward 计算和下面的重开判断）
         │
         ▼
 PPO Agent.predict(observation) -> action (int)
@@ -148,7 +150,7 @@ EpisodeLogger.log(step, action, state, reward)
   - 已知局限：`player_pos`/`boss_pos`/精确 `distance` 这类数值在游戏UI上不显示，画面方案拿不到精确坐标，只能退化为粗略估计（如根据锁定框大小/角色画面占比间接判断远近）或直接从 observation 中去掉这些字段，改用相对距离的模糊分档。
   - 两种实现（mock / 画面读取）都实现同一 `StateReader` 接口，可在 config 里切换。
 - **键鼠控制**：`pydirectinput`（比 pyautogui 更适合游戏，因为它模拟的是 DirectInput 扫描码，游戏引擎更容易识别）。闪避的 Shift+方向键组合用 `pydirectinput.keyDown/keyUp` 手动控制按下时长。
-- **Gym 环境**：`gymnasium.Env`，`observation_space` 用 `Box` 表示连续状态（hp/posture/distance 等归一化到 0-1），`action_space` 用 `Discrete(7)`。
-- **RL 算法**：`stable-baselines3` 的 `PPO`，`policy="MlpPolicy"`（状态是低维向量，不需要 CNN）。
+- **Gym 环境**：`gymnasium.Env`，`observation_space` 用 `Box` 表示堆叠的灰度像素帧（`(84,84,stack_size)`，uint8，具体形状见 [configuration.md](configuration.md)），`action_space` 用 `Discrete(7)`。
+- **RL 算法**：`stable-baselines3` 的 `PPO`，`policy="CnnPolicy"`（观测是 `(84,84,stack_size)` 的 uint8 灰度图像堆叠，SB3 会自动为这个图像 `Box` 空间构建默认的 `NatureCNN` 特征提取器，不需要手动传 `policy_kwargs`）。
 - **日志**：SB3 自带 `tensorboard_log` 参数直接接入 TensorBoard；额外自定义 `BaseCallback` 记录每个 episode 的死亡原因/击杀用时到 CSV。
 - **配置管理**：用一个 `config.yaml` + 简单 dataclass 加载，统一管理按键映射、奖励权重、训练超参，避免硬编码分散在各文件。
