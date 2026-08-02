@@ -1,71 +1,71 @@
-# Pixel Frame Observation Implementation Plan
+# 像素帧观测（Pixel Frame Observation）实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **给自动化执行者的提示：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 来逐任务（task-by-task）执行本计划。步骤使用复选框（`- [ ]`）语法进行跟踪。
 
-**Goal:** Replace `SekiroEnv`'s 13-dim scalar observation with a stacked 84x84 grayscale image observation read directly from game pixels, while keeping numeric HP/posture extraction alive (for reward/restart only) and preserving a fully offline mock-mode test path.
+**目标：** 用一个直接从游戏像素读取、经过堆叠的 84x84 灰度图像观测，替换掉 `SekiroEnv` 现有的 13 维标量观测，同时保留数值型 HP/架势提取（仅用于 reward/restart），并保证完全离线的 mock 模式测试路径依然可用。
 
-**Architecture:** `StateReader` gains a second read method, `read_frame() -> np.ndarray` (single 84x84 uint8 grayscale frame), alongside the existing `read() -> GameState` (numeric state for reward/restart). A new `FrameStack` module samples frames at a configurable interval (`frame_skip`) and keeps a sliding window of `stack_size` frames, which becomes `SekiroEnv`'s `Box(shape=(84,84,stack_size), dtype=uint8)` observation. `MockStateReader` renders synthetic bar-graphics for `read_frame()` (positioned using the same `calibration` rects `PixelStateReader` uses for its numeric extraction), so the whole training pipeline still runs with no game window. `train.py`/`play.py` switch PPO's policy from `MlpPolicy` to `CnnPolicy`.
+**架构：** `StateReader` 新增第二个读取方法 `read_frame() -> np.ndarray`（单帧 84x84 uint8 灰度图），与现有的 `read() -> GameState`（用于 reward/restart 的数值状态）并存。新增的 `FrameStack` 模块按可配置的间隔（`frame_skip`）采样帧，并维护一个大小为 `stack_size` 的滑动窗口，这个窗口构成 `SekiroEnv` 的 `Box(shape=(84,84,stack_size), dtype=uint8)` 观测。`MockStateReader` 为 `read_frame()` 渲染合成的血条图形（使用与 `PixelStateReader` 数值提取相同的 `calibration` rect 来定位），因此整条训练管线在没有游戏窗口的情况下依然能跑通。`train.py`/`play.py` 将 PPO 的 policy 从 `MlpPolicy` 切换为 `CnnPolicy`。
 
-**Tech Stack:** Python 3.13, OpenCV (`opencv-python`, already in requirements.txt), `mss` (screen capture), NumPy, Gymnasium, stable-baselines3 PPO `CnnPolicy`.
+**技术栈：** Python 3.13、OpenCV（`opencv-python`，requirements.txt 中已有）、`mss`（屏幕截图）、NumPy、Gymnasium、stable-baselines3 PPO 的 `CnnPolicy`。
 
-## Global Constraints
+## 全局约束
 
-- `observation_space` becomes `spaces.Box(low=0, high=255, shape=(84,84,stack_size), dtype=np.uint8)`, replacing the old `Box(shape=(13,), dtype=np.float32)`. Default `frame_size=[84,84]`, `frame_skip=4`, `stack_size=4`, all overridable via `config.yaml`'s new `observation:` section.
-- `StateReader.read_frame()` is a new **abstract** method (not optional) — every `StateReader` subclass, including test doubles, must implement it.
-- `read()` and `read_frame()` must NOT share a screenshot cache. `RestartManager.run()` polls `reader.read()` in a blocking loop waiting for state to change (`restart/restart_manager.py:88-124`); a shared/stale capture would make that loop see a frozen state and time out. Each capture is independent, even though real-mode this costs one extra `mss` grab per env step.
-- Numeric HP/posture extraction in `PixelStateReader.read()` only needs to produce `player_hp`, `boss_hp`, `player_posture`, `boss_posture`, `player_dead`, `boss_dead`. `boss_action`, `can_parry`, `player_hit`, `player_pos`, `boss_pos`, `distance` stay at `GameState` defaults — perilous-icon template matching and position/distance estimation are explicitly out of scope (per the design spec).
-- Training visualization UI is explicitly out of scope for this plan (separate future brainstorming round, per user request).
-- Real-game features stay Windows-only and keep the project's lazy-import convention: `cv2`/`mss`/`win32gui` are imported inside `PixelStateReader` methods, never at module top level.
-- `mock_reader.py` must NOT import `cv2` (or any other package from the "only needed for `--live`" list in `docs/installation.md`) even for its new image rendering — draw synthetic frames with plain NumPy slicing instead, so stage 1-7's "runs with no extra deps installed" guarantee still holds. `numpy`/`PyYAML` are already always-installed core deps (per `docs/installation.md`'s dependency table) and may be imported at module top level anywhere.
-- This project has no pytest and no test runner config (confirmed: `pytest` is not installed in `venv`). Tests are standalone argparse-free or argparse scripts under `tests/`, run directly with `python tests/test_X.py`, using hand-rolled `assert`/PASS-FAIL-log patterns (see `tests/test_reward.py` for the house style). All new tests in this plan follow that same style, not pytest.
-- Design spec (read before starting): `docs/superpowers/specs/2026-08-02-pixel-frame-observation-design.md`.
-
----
-
-## File Structure
-
-New files:
-- `sekiro_ai/state_reader/frame_stack.py` — `FrameStack` class (pure NumPy, no StateReader/config dependency).
-- `sekiro_ai/state_reader/observation_config.py` — `ObservationConfig` dataclass, loads `config.yaml`'s `observation:` section (mirrors `reward/reward_calculator.py`'s `RewardWeights.from_config()` pattern already in the codebase).
-- `tests/test_frame_stack.py`, `tests/test_mock_frame.py`, `tests/test_pixel_bar_extraction.py` — new test scripts, one per new testable unit.
-
-Modified files:
-- `sekiro_ai/state_reader/base.py` — add abstract `read_frame()` to `StateReader`.
-- `sekiro_ai/state_reader/mock_reader.py` — add `render_frame()`/`read_frame()`, calibration-scaled synthetic bar drawing.
-- `sekiro_ai/state_reader/pixel_reader.py` — implement `read()` (bar-rect + HSV fill ratio) and `read_frame()` (capture + grayscale + resize); add `_capture_client_area()` and `bar_fill_ratio()` helpers.
-- `sekiro_ai/env/sekiro_env.py` — `observation_space` becomes an image `Box`; `reset()`/`step()` call `read_frame()` through a `FrameStack`; remove `OBS_DIM`/`state_to_obs`.
-- `sekiro_ai/env/__init__.py` — drop the `OBS_DIM` export (no longer exists).
-- `tests/test_restart.py` — `ScriptedDeathReader` gains a `read_frame()` stub (required now that it's abstract).
-- `tests/test_env.py` — assert the new image `observation_space` shape/dtype.
-- `tests/test_state_reader.py` — add `--save-frames N` PNG-export option.
-- `config/config.yaml` — new `observation:` section; new `calibration.posture_color_hsv_range` field.
-- `train.py`, `play.py` — `PPO("CnnPolicy", ...)` instead of `PPO("MlpPolicy", ...)`.
-- `docs/architecture.md`, `docs/installation.md`, `docs/training.md`, `docs/configuration.md` — update the "13-dim vector / MlpPolicy, no CNN needed" statements to describe the new image observation.
+- `observation_space` 变为 `spaces.Box(low=0, high=255, shape=(84,84,stack_size), dtype=np.uint8)`，替换掉原来的 `Box(shape=(13,), dtype=np.float32)`。默认 `frame_size=[84,84]`、`frame_skip=4`、`stack_size=4`，均可通过 `config.yaml` 新增的 `observation:` 部分覆盖。
+- `StateReader.read_frame()` 是新增的**抽象**方法（不是可选的）——每一个 `StateReader` 子类，包括测试替身（test doubles），都必须实现它。
+- `read()` 和 `read_frame()` 不能共享截图缓存。`RestartManager.run()` 会在阻塞循环中反复调用 `reader.read()`（`restart/restart_manager.py:88-124`）等待状态发生变化；如果共享/使用过期的截图，这个循环会一直看到冻结的状态并最终超时。每次截图都是独立的，即便在真实模式下这意味着每个环境步骤要多做一次 `mss` 抓图。
+- `PixelStateReader.read()` 中的数值型 HP/架势提取只需要产出 `player_hp`、`boss_hp`、`player_posture`、`boss_posture`、`player_dead`、`boss_dead`。`boss_action`、`can_parry`、`player_hit`、`player_pos`、`boss_pos`、`distance` 保持 `GameState` 的默认值——"危"字图标模板匹配以及位置/距离估算明确不在本次范围内（依据设计文档）。
+- 训练可视化 UI 明确不在本计划范围内（根据用户要求，将作为单独的一轮后续 brainstorming）。
+- 真实游戏相关功能保持仅限 Windows，并遵循项目现有的惰性导入约定：`cv2`/`mss`/`win32gui` 在 `PixelStateReader` 的方法内部导入，绝不在模块顶层导入。
+- `mock_reader.py` 即便为了新增的图像渲染功能，也**不能**导入 `cv2`（或 `docs/installation.md` 中"仅 `--live` 需要"清单里的任何其他包）——改用纯 NumPy 切片来绘制合成帧，这样阶段 1-7 "无需安装额外依赖即可运行"的保证才能继续成立。`numpy`/`PyYAML` 已经是始终安装的核心依赖（依据 `docs/installation.md` 的依赖表），可以在任何地方的模块顶层导入。
+- 本项目没有 pytest，也没有测试运行器配置（已确认：`venv` 中未安装 `pytest`）。测试是 `tests/` 目录下不依赖/依赖 argparse 的独立脚本，直接用 `python tests/test_X.py` 运行，采用手写的 `assert`/PASS-FAIL 日志模式（参见 `tests/test_reward.py` 的风格）。本计划新增的所有测试都遵循同样的风格，而不是 pytest。
+- 设计文档（开始前请先阅读）：`docs/superpowers/specs/2026-08-02-pixel-frame-observation-design.md`。
 
 ---
 
-### Task 1: FrameStack module
+## 文件结构
 
-**Files:**
-- Create: `sekiro_ai/state_reader/frame_stack.py`
-- Test: `tests/test_frame_stack.py`
+新建文件：
+- `sekiro_ai/state_reader/frame_stack.py` —— `FrameStack` 类（纯 NumPy，不依赖 StateReader/config）。
+- `sekiro_ai/state_reader/observation_config.py` —— `ObservationConfig` 数据类，加载 `config.yaml` 的 `observation:` 部分（沿用代码库中已有的 `reward/reward_calculator.py` 里 `RewardWeights.from_config()` 的模式）。
+- `tests/test_frame_stack.py`、`tests/test_mock_frame.py`、`tests/test_pixel_bar_extraction.py` —— 新增的测试脚本，每个新的可测试单元对应一个。
 
-**Interfaces:**
-- Consumes: nothing (pure NumPy, no project imports).
-- Produces: `class FrameStack` with:
+修改文件：
+- `sekiro_ai/state_reader/base.py` —— 为 `StateReader` 添加抽象方法 `read_frame()`。
+- `sekiro_ai/state_reader/mock_reader.py` —— 添加 `render_frame()`/`read_frame()`，以及按 calibration 缩放的合成血条绘制。
+- `sekiro_ai/state_reader/pixel_reader.py` —— 实现 `read()`（bar-rect + HSV 填充比例）和 `read_frame()`（截图 + 灰度化 + resize）；添加 `_capture_client_area()` 和 `bar_fill_ratio()` 辅助函数。
+- `sekiro_ai/env/sekiro_env.py` —— `observation_space` 变为图像型 `Box`；`reset()`/`step()` 通过 `FrameStack` 调用 `read_frame()`；移除 `OBS_DIM`/`state_to_obs`。
+- `sekiro_ai/env/__init__.py` —— 去掉 `OBS_DIM` 的导出（已不存在）。
+- `tests/test_restart.py` —— `ScriptedDeathReader` 增加 `read_frame()` 占位实现（现在该方法是抽象方法，必须实现）。
+- `tests/test_env.py` —— 断言新的图像型 `observation_space` 形状/dtype。
+- `tests/test_state_reader.py` —— 添加 `--save-frames N` 的 PNG 导出选项。
+- `config/config.yaml` —— 新增 `observation:` 部分；新增 `calibration.posture_color_hsv_range` 字段。
+- `train.py`、`play.py` —— 用 `PPO("CnnPolicy", ...)` 替代 `PPO("MlpPolicy", ...)`。
+- `docs/architecture.md`、`docs/installation.md`、`docs/training.md`、`docs/configuration.md` —— 更新"13维向量 / MlpPolicy，不需要 CNN"的相关表述，改为描述新的图像观测。
+
+---
+
+### 任务 1：FrameStack 模块
+
+**文件：**
+- 新建：`sekiro_ai/state_reader/frame_stack.py`
+- 测试：`tests/test_frame_stack.py`
+
+**接口：**
+- 依赖：无（纯 NumPy，不依赖项目内其他模块）。
+- 产出：`class FrameStack`，包含：
   - `__init__(self, stack_size: int = 4, frame_skip: int = 4)`
-  - `reset(self, frame: np.ndarray) -> np.ndarray` — clears state, fills the whole stack with `frame` (copied `stack_size` times), returns the `(H, W, stack_size)` stacked array.
-  - `push(self, frame: np.ndarray) -> np.ndarray` — call once per env step with the newest captured frame; internally counts calls and only rotates a new frame into the stack every `frame_skip` calls (repeating the most recent stacked frame on skipped calls), returns the current `(H, W, stack_size)` stacked array.
-  - Frames passed in are always full-size `(H, W)` 2D uint8 arrays (grayscale, already resized by the caller); `FrameStack` does no resizing/color conversion itself, it only stacks.
+  - `reset(self, frame: np.ndarray) -> np.ndarray` —— 清空内部状态，用 `frame`（复制 `stack_size` 次）填满整个堆栈，返回 `(H, W, stack_size)` 的堆叠数组。
+  - `push(self, frame: np.ndarray) -> np.ndarray` —— 每个环境步骤调用一次，传入最新捕获的帧；内部记录调用次数，只有每隔 `frame_skip` 次调用才把新帧轮转进堆栈（在被跳过的调用中重复最近一次入栈的帧），返回当前的 `(H, W, stack_size)` 堆叠数组。
+  - 传入的帧始终是完整尺寸的 `(H, W)` 二维 uint8 数组（灰度图，调用方已完成 resize）；`FrameStack` 本身不做 resize/颜色转换，只负责堆叠。
 
-Downstream (`SekiroEnv`, Task 5) relies on exactly these two method names and this exact behavior: `reset()` is called once per episode start, `push()` once per `step()`, and both return `(H, W, stack_size)` uint8 ndarrays with the oldest frame at index 0 and newest at index `stack_size - 1` along the last axis.
+下游模块（`SekiroEnv`，任务 5）依赖这两个方法名和这个确切行为：`reset()` 在每个 episode 开始时调用一次，`push()` 在每次 `step()` 调用一次，两者都返回 `(H, W, stack_size)` 的 uint8 ndarray，最旧的帧在最后一维的索引 0 处，最新的帧在索引 `stack_size - 1` 处。
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **步骤 1：编写会失败的测试**
 
 ```python
-"""Standalone test for sekiro_ai.state_reader.frame_stack.FrameStack.
+"""sekiro_ai.state_reader.frame_stack.FrameStack 的独立测试脚本。
 
-Usage:
+用法：
     python tests/test_frame_stack.py
 """
 from __future__ import annotations
@@ -84,8 +84,7 @@ logger = get_logger("frame_stack", "frame_stack.log")
 
 
 def make_frame(value: int) -> np.ndarray:
-    """An 8x8 frame filled with a single value, so stacked slices are
-    trivially distinguishable by their scalar fill value."""
+    """一个填充单一数值的 8x8 帧，这样堆叠后的切片可以通过标量填充值轻易区分。"""
     return np.full((8, 8), value, dtype=np.uint8)
 
 
@@ -100,8 +99,8 @@ def test_reset_fills_stack_with_first_frame() -> bool:
 def test_push_before_skip_interval_repeats_last_frame() -> bool:
     fs = FrameStack(stack_size=4, frame_skip=4)
     fs.reset(make_frame(1))
-    # frame_skip=4: only every 4th push() call should rotate in a new frame.
-    # Calls 1-3 after reset should NOT change the stack.
+    # frame_skip=4：只有每第 4 次 push() 调用才会轮转进新帧。
+    # reset 之后的第 1-3 次调用不应改变堆栈。
     before = fs.push(make_frame(99)).copy()
     stacked = fs.push(make_frame(50))
     ok = np.array_equal(before, stacked)
@@ -112,8 +111,8 @@ def test_push_before_skip_interval_repeats_last_frame() -> bool:
 def test_push_at_skip_interval_rotates_newest_frame() -> bool:
     fs = FrameStack(stack_size=4, frame_skip=2)
     fs.reset(make_frame(0))
-    fs.push(make_frame(11))  # call 1: within skip interval, no rotation
-    stacked = fs.push(make_frame(22))  # call 2: skip interval reached, rotate in 22
+    fs.push(make_frame(11))  # 第 1 次调用：还在跳过间隔内，不轮转
+    stacked = fs.push(make_frame(22))  # 第 2 次调用：达到跳过间隔，轮转进 22
     ok = stacked[:, :, -1][0, 0] == 22
     logger.info("[%s] newest frame lands at last stack index after frame_skip calls", "PASS" if ok else "FAIL")
     return ok
@@ -153,24 +152,23 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **步骤 2：运行测试确认它会失败**
 
-Run: `python tests/test_frame_stack.py`
-Expected: `ModuleNotFoundError: No module named 'sekiro_ai.state_reader.frame_stack'`
+运行：`python tests/test_frame_stack.py`
+预期：`ModuleNotFoundError: No module named 'sekiro_ai.state_reader.frame_stack'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **步骤 3：编写最小实现**
 
 ```python
-"""Fixed-size, frame-skipping sliding window over grayscale image frames.
+"""对灰度图像帧进行固定大小、支持跳帧采样的滑动窗口处理。
 
-Turns a stream of single 84x84-ish grayscale frames (one per env step) into
-a (H, W, stack_size) observation the way Atari-style RL setups do: instead
-of stacking every consecutive frame (which barely changes at 60fps and
-wastes the stack's temporal window on near-duplicates), only every
-`frame_skip`-th call actually rotates a new frame in -- calls in between
-repeat the most recently stacked frame. This has no dependency on
-StateReader/config -- it only knows about ndarrays, so it's testable and
-reusable standalone (see docs/superpowers/specs/2026-08-02-pixel-frame-observation-design.md).
+把一串单帧的、大约 84x84 大小的灰度图（每个环境步骤一帧）转换成
+Atari 风格 RL 常用的 (H, W, stack_size) observation：不是把每一个连续帧都堆进去
+（那样在 60fps 下画面几乎不变，会把堆栈的时间窗口浪费在几乎重复的帧上），
+而是只有每第 `frame_skip` 次调用才真正轮转进一个新帧——中间的调用会重复
+最近一次入栈的帧。这个模块不依赖 StateReader/config，只处理 ndarray，
+因此可以独立测试和复用
+（参见 docs/superpowers/specs/2026-08-02-pixel-frame-observation-design.md）。
 """
 from __future__ import annotations
 
@@ -206,12 +204,12 @@ class FrameStack:
         return np.stack(self._frames, axis=-1)
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **步骤 4：运行测试确认它通过**
 
-Run: `python tests/test_frame_stack.py`
-Expected: `All 4 FrameStack tests PASSED.` (no `[FAIL]` lines, exit without traceback)
+运行：`python tests/test_frame_stack.py`
+预期：`All 4 FrameStack tests PASSED.`（没有 `[FAIL]` 行，且没有 traceback 退出）
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add sekiro_ai/state_reader/frame_stack.py tests/test_frame_stack.py
@@ -220,26 +218,26 @@ git commit -m "feat: add FrameStack for frame-skip image observation stacking"
 
 ---
 
-### Task 2: Observation config + calibration posture color range
+### 任务 2：Observation 配置 + calibration 架势颜色范围
 
-**Files:**
-- Create: `sekiro_ai/state_reader/observation_config.py`
-- Modify: `config/config.yaml`
-- Modify: `docs/configuration.md`
+**文件：**
+- 新建：`sekiro_ai/state_reader/observation_config.py`
+- 修改：`config/config.yaml`
+- 修改：`docs/configuration.md`
 
-**Interfaces:**
-- Consumes: `sekiro_ai.utils.config_loader.load_config()` (existing, `sekiro_ai/utils/config_loader.py:20`).
-- Produces: `class ObservationConfig` with fields `frame_size: tuple[int, int] = (84, 84)`, `frame_skip: int = 4`, `stack_size: int = 4`, and classmethod `from_config(config: dict | None = None) -> "ObservationConfig"` (mirrors `RewardWeights.from_config` in `sekiro_ai/reward/reward_calculator.py:46-52` — same merge-over-defaults pattern). Task 3 (`MockStateReader`) and Task 4 (`PixelStateReader`) both construct one of these; Task 5 (`SekiroEnv`) constructs one to size its `FrameStack`.
-- Also produces: `config.yaml`'s new `calibration.posture_color_hsv_range` field, read directly via `load_config().get("calibration", {}).get("posture_color_hsv_range")` (no new config class needed for this one field — it lives alongside the existing `hp_color_hsv_range` sibling in the same `calibration:` section, following that section's existing plain-dict-access style in `pixel_reader.py`).
+**接口：**
+- 依赖：`sekiro_ai.utils.config_loader.load_config()`（已有，`sekiro_ai/utils/config_loader.py:20`）。
+- 产出：`class ObservationConfig`，字段为 `frame_size: tuple[int, int] = (84, 84)`、`frame_skip: int = 4`、`stack_size: int = 4`，以及类方法 `from_config(config: dict | None = None) -> "ObservationConfig"`（沿用 `sekiro_ai/reward/reward_calculator.py:46-52` 中 `RewardWeights.from_config` 的模式——同样的"在默认值基础上合并覆盖"模式）。任务 3（`MockStateReader`）和任务 4（`PixelStateReader`）都会各自构造一个这样的实例；任务 5（`SekiroEnv`）会构造一个用来确定其 `FrameStack` 的大小。
+- 同时产出：`config.yaml` 新增的 `calibration.posture_color_hsv_range` 字段，直接通过 `load_config().get("calibration", {}).get("posture_color_hsv_range")` 读取（这一个字段不需要新的配置类——它和现有的 `hp_color_hsv_range` 一起放在同一个 `calibration:` 部分里，沿用该部分在 `pixel_reader.py` 中现有的纯字典访问风格）。
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **步骤 1：编写会失败的测试**
 
-Add to a new `tests/test_observation_config.py`:
+新建 `tests/test_observation_config.py`：
 
 ```python
-"""Standalone test for sekiro_ai.state_reader.observation_config.ObservationConfig.
+"""sekiro_ai.state_reader.observation_config.ObservationConfig 的独立测试脚本。
 
-Usage:
+用法：
     python tests/test_observation_config.py
 """
 from __future__ import annotations
@@ -292,21 +290,21 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **步骤 2：运行测试确认它会失败**
 
-Run: `python tests/test_observation_config.py`
-Expected: `ModuleNotFoundError: No module named 'sekiro_ai.state_reader.observation_config'`
+运行：`python tests/test_observation_config.py`
+预期：`ModuleNotFoundError: No module named 'sekiro_ai.state_reader.observation_config'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **步骤 3：编写最小实现**
 
 ```python
-"""Config for the pixel-frame observation pipeline (frame size, frame-skip
-sampling interval, stack size) -- shared by MockStateReader, PixelStateReader,
-and SekiroEnv so all three agree on the observation shape without any of them
-hardcoding it (see docs/superpowers/specs/2026-08-02-pixel-frame-observation-design.md).
+"""像素帧观测管线的配置（帧尺寸、跳帧采样间隔、堆栈大小）—— 由
+MockStateReader、PixelStateReader 和 SekiroEnv 三者共用，让它们对观测
+形状达成一致，而不需要各自硬编码
+（参见 docs/superpowers/specs/2026-08-02-pixel-frame-observation-design.md）。
 
-Follows the same "dataclass + from_config() merges over defaults" pattern as
-sekiro_ai/reward/reward_calculator.py's RewardWeights.
+沿用 sekiro_ai/reward/reward_calculator.py 的 RewardWeights 那种
+"dataclass + from_config() 在默认值上合并覆盖"的模式。
 """
 from __future__ import annotations
 
@@ -338,42 +336,42 @@ class ObservationConfig:
         )
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **步骤 4：运行测试确认它通过**
 
-Run: `python tests/test_observation_config.py`
-Expected: `All 3 ObservationConfig tests PASSED.`
+运行：`python tests/test_observation_config.py`
+预期：`All 3 ObservationConfig tests PASSED.`
 
-- [ ] **Step 5: Add `observation:` section and `posture_color_hsv_range` to config.yaml**
+- [ ] **步骤 5：向 config.yaml 添加 `observation:` 部分和 `posture_color_hsv_range`**
 
-Add this new top-level section to `config/config.yaml` (after the existing `calibration:` section):
+在 `config/config.yaml` 中添加这个新的顶层部分（放在现有的 `calibration:` 部分之后）：
 
 ```yaml
 observation:
-  # Pixel-frame observation shape fed to the PPO agent (sekiro_ai.state_reader.observation_config).
-  # frame_size: single-frame resize target [width, height] before stacking.
-  # frame_skip: sample a new frame into the stack every N env steps (in between,
-  #   the most recently stacked frame repeats) -- at 60fps this keeps the stack's
-  #   time window wide enough to show motion instead of 4 nearly-identical frames.
-  # stack_size: number of frames kept in the sliding window; observation shape
-  #   is (frame_size[1], frame_size[0], stack_size).
+  # 喂给 PPO agent 的像素帧观测形状（sekiro_ai.state_reader.observation_config）。
+  # frame_size：堆叠前单帧 resize 的目标尺寸 [width, height]。
+  # frame_skip：每隔 N 个环境步骤才采样一个新帧入栈（在此期间，
+  #   最近入栈的帧会重复）——在 60fps 下，这样能让堆栈的时间窗口
+  #   足够宽以体现出运动，而不是 4 张几乎一样的帧。
+  # stack_size：滑动窗口中保留的帧数；observation 的形状为
+  #   (frame_size[1], frame_size[0], stack_size)。
   frame_size: [84, 84]
   frame_skip: 4
   stack_size: 4
 ```
 
-Also add `posture_color_hsv_range` to the existing `calibration:` section, right after `hp_color_hsv_range`:
+再向现有的 `calibration:` 部分添加 `posture_color_hsv_range`，紧跟在 `hp_color_hsv_range` 之后：
 
 ```yaml
-  posture_color_hsv_range: [[15, 80, 80], [35, 255, 255]]   # yellow chevron posture bar fill, distinct from the red/salmon HP bars above
+  posture_color_hsv_range: [[15, 80, 80], [35, 255, 255]]   # 黄色箭头架势条填充色，与上面红/橙的 HP 条区分开
 ```
 
-(Measured against `GAME_PIC/BOSS.png`/`GAME_PIC/WITHOUT_BOSS.png`: this range gives a HP-bar-vs-posture-bar HSV separation that correctly reads ~0 fill on an empty posture bar and high fill on a full one in both sample screenshots — verified by manual `cv2.inRange` + column-fill-ratio checks during planning, not by an automated test since there's no live game window yet.)
+（依据 `GAME_PIC/BOSS.png`/`GAME_PIC/WITHOUT_BOSS.png` 测得：这个范围能让 HP 条和架势条的 HSV 区分度做到——在两张样例截图中，空架势条正确读出接近 0 的填充比例，满架势条读出高填充比例——是在规划阶段通过手动 `cv2.inRange` + 逐列填充比例检查验证的，不是通过自动化测试验证的，因为目前还没有真实的游戏窗口。）
 
-- [ ] **Step 6: Document the new config fields**
+- [ ] **步骤 6：为新增的配置字段编写文档**
 
-In `docs/configuration.md`, add a subsection after the existing `calibration` section documenting `observation:` (fields, defaults, what changing `frame_skip`/`stack_size` does to training) and add `posture_color_hsv_range` to the `calibration` fields table, following the existing doc's style (see the `hp_color_hsv_range` row already there).
+在 `docs/configuration.md` 中，在现有的 `calibration` 部分之后添加一个小节，说明 `observation:`（字段、默认值、修改 `frame_skip`/`stack_size` 对训练的影响），并在 `calibration` 字段表中添加 `posture_color_hsv_range`，遵循该文档现有的风格（参见文档中已有的 `hp_color_hsv_range` 那一行）。
 
-- [ ] **Step 7: Commit**
+- [ ] **步骤 7：提交**
 
 ```bash
 git add sekiro_ai/state_reader/observation_config.py tests/test_observation_config.py config/config.yaml docs/configuration.md
@@ -382,21 +380,21 @@ git commit -m "feat: add ObservationConfig and observation/posture_color config 
 
 ---
 
-### Task 3: `StateReader.read_frame()` abstract method + `MockStateReader` implementation
+### 任务 3：`StateReader.read_frame()` 抽象方法 + `MockStateReader` 实现
 
-**Files:**
-- Modify: `sekiro_ai/state_reader/base.py`
-- Modify: `sekiro_ai/state_reader/mock_reader.py`
-- Modify: `tests/test_restart.py` (its `ScriptedDeathReader` test double must implement the now-abstract method)
-- Test: `tests/test_mock_frame.py`
+**文件：**
+- 修改：`sekiro_ai/state_reader/base.py`
+- 修改：`sekiro_ai/state_reader/mock_reader.py`
+- 修改：`tests/test_restart.py`（其 `ScriptedDeathReader` 测试替身必须实现这个现已变为抽象方法的方法）
+- 测试：`tests/test_mock_frame.py`
 
-**Interfaces:**
-- Consumes: `ObservationConfig.from_config()` (Task 2, `sekiro_ai/state_reader/observation_config.py`), `load_config()` (existing, `sekiro_ai/utils/config_loader.py`).
-- Produces: `StateReader.read_frame(self) -> np.ndarray` as an `@abstractmethod` on the base class (`sekiro_ai/state_reader/base.py`) — every subclass must implement it or fail to instantiate. `MockStateReader.read_frame()` returns a `(H, W)` uint8 grayscale ndarray sized per `ObservationConfig.frame_size` (note: NumPy shape order is `(height, width)`, i.e. `(frame_size[1], frame_size[0])`), synthesizing bar graphics from the current `GameState`'s `player_hp`/`boss_hp`/`player_posture`/`boss_posture`. This is what Task 5 (`SekiroEnv`) and Task 6 (test updates) call.
+**接口：**
+- 依赖：`ObservationConfig.from_config()`（任务 2，`sekiro_ai/state_reader/observation_config.py`）、`load_config()`（已有，`sekiro_ai/utils/config_loader.py`）。
+- 产出：在基类（`sekiro_ai/state_reader/base.py`）上把 `StateReader.read_frame(self) -> np.ndarray` 定义为 `@abstractmethod`——每个子类都必须实现它，否则无法实例化。`MockStateReader.read_frame()` 返回一个按 `ObservationConfig.frame_size` 确定大小的 `(H, W)` uint8 灰度 ndarray（注意：NumPy 的形状顺序是 `(height, width)`，即 `(frame_size[1], frame_size[0])`），根据当前 `GameState` 的 `player_hp`/`boss_hp`/`player_posture`/`boss_posture` 合成血条图形。这是任务 5（`SekiroEnv`）和任务 6（测试更新）会调用的内容。
 
-- [ ] **Step 1: Update `StateReader.read_frame()` as abstract, and `ScriptedDeathReader` stub, before writing MockStateReader's real implementation**
+- [ ] **步骤 1：先把 `StateReader.read_frame()` 更新为抽象方法，并给 `ScriptedDeathReader` 加占位实现，然后再编写 MockStateReader 的真实实现**
 
-Edit `sekiro_ai/state_reader/base.py`, adding the import and abstract method:
+编辑 `sekiro_ai/state_reader/base.py`，添加导入和抽象方法：
 
 ```python
 from __future__ import annotations
@@ -439,7 +437,7 @@ class StateReader(ABC):
         return None
 ```
 
-Edit `tests/test_restart.py`'s `ScriptedDeathReader` (currently `tests/test_restart.py:31-58`) to add a stub `read_frame()` — it's now required for the class to instantiate at all, even though this test doesn't exercise frame reading:
+编辑 `tests/test_restart.py` 中的 `ScriptedDeathReader`（目前在 `tests/test_restart.py:31-58`），添加一个占位的 `read_frame()`——现在这个方法是抽象方法，类要能实例化就必须实现它，即便这个测试本身不会真正用到帧读取：
 
 ```python
     def read_frame(self):
@@ -447,22 +445,21 @@ Edit `tests/test_restart.py`'s `ScriptedDeathReader` (currently `tests/test_rest
         return np.zeros((84, 84), dtype=np.uint8)
 ```
 
-Add this method inside `class ScriptedDeathReader(StateReader):`, alongside its existing `read()`/`reset()`.
+把这个方法加到 `class ScriptedDeathReader(StateReader):` 内部，和它现有的 `read()`/`reset()` 放在一起。
 
-- [ ] **Step 2: Run `test_restart.py` to confirm it still passes (proves the abstract method doesn't break existing test doubles once stubbed)**
+- [ ] **步骤 2：运行 `test_restart.py` 确认它依然通过（证明加了占位实现之后，抽象方法不会破坏现有的测试替身）**
 
-Run: `python tests/test_restart.py`
-Expected: `PASS: restart sequence completed and returned a fresh state.` (same as before this task's changes)
+运行：`python tests/test_restart.py`
+预期：`PASS: restart sequence completed and returned a fresh state.`（和本任务改动之前一样）
 
-- [ ] **Step 3: Write the failing test for MockStateReader.read_frame()**
+- [ ] **步骤 3：为 MockStateReader.read_frame() 编写会失败的测试**
 
 ```python
-"""Standalone test for MockStateReader's read_frame() synthetic image
-generation.
+"""MockStateReader 的 read_frame() 合成图像生成功能的独立测试脚本。
 
-Usage:
+用法：
     python tests/test_mock_frame.py
-    python tests/test_mock_frame.py --save-frames 5   # also dump PNGs for visual inspection
+    python tests/test_mock_frame.py --save-frames 5   # 同时导出 PNG 供肉眼检查
 """
 from __future__ import annotations
 
@@ -492,9 +489,9 @@ def test_read_frame_shape_and_dtype() -> bool:
 
 
 def test_full_hp_bar_brighter_than_empty_hp_bar() -> bool:
-    """A full HP bar should have more bright (filled) pixels than a nearly
-    empty one, at the same bar location -- proxy for "the drawn bar tracks
-    the GameState value" without needing exact pixel-perfect assertions."""
+    """满血条应该比同一位置几乎空的血条有更多的亮（已填充）像素 ——
+    这是"绘制出的血条确实跟随 GameState 数值变化"的一个代理验证方式，
+    不需要精确到像素级的断言。"""
     reader = MockStateReader(mode="scripted", seed=0)
     reader._state.player_hp = 1.0
     full_frame = reader.read_frame()
@@ -517,7 +514,7 @@ def save_frames(n: int) -> None:
 
     reader = MockStateReader(mode="scripted", seed=0)
     for i in range(n):
-        reader.read()  # advance the scripted trajectory
+        reader.read()  # 推进脚本化轨迹
         frame = reader.read_frame()
         path = FRAME_PREVIEW_DIR / f"mock_frame_{i:03d}.png"
         cv2.imwrite(str(path), frame)
@@ -546,25 +543,25 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 4: Run test to verify it fails**
+- [ ] **步骤 4：运行测试确认它会失败**
 
-Run: `python tests/test_mock_frame.py`
-Expected: `AttributeError: 'MockStateReader' object has no attribute 'read_frame'`
+运行：`python tests/test_mock_frame.py`
+预期：`AttributeError: 'MockStateReader' object has no attribute 'read_frame'`
 
-- [ ] **Step 5: Implement `MockStateReader.read_frame()`**
+- [ ] **步骤 5：实现 `MockStateReader.read_frame()`**
 
-Add to `sekiro_ai/state_reader/mock_reader.py` (imports at top of file, method on the class, module-level helper functions at the bottom):
+添加到 `sekiro_ai/state_reader/mock_reader.py`（文件顶部的导入、类上的方法、文件底部的模块级辅助函数）：
 
 ```python
-# Add to the top-level imports:
+# 添加到顶层导入中：
 import numpy as np
 
 from .observation_config import ObservationConfig
 from ..utils.config_loader import load_config
 
-# Bar rects to draw, keyed by the same names used in config.yaml's
-# calibration section, and the GameState attribute each one's fill ratio
-# should track. Order doesn't matter; drawn independently.
+# 要绘制的血条 rect，键名与 config.yaml 的 calibration 部分中使用的名称
+# 一致，值是每个 rect 的填充比例应该跟踪的 GameState 属性名。顺序无关紧要，
+# 各自独立绘制。
 _BAR_SPECS = (
     ("player_hp_bar", "player_hp"),
     ("player_posture_bar", "player_posture"),
@@ -573,17 +570,16 @@ _BAR_SPECS = (
 )
 ```
 
-Add this method to `class MockStateReader(StateReader)`, e.g. right after `read()`:
+把这个方法添加到 `class MockStateReader(StateReader)` 上，比如放在 `read()` 之后：
 
 ```python
     def read_frame(self) -> np.ndarray:
-        """Synthetic 84x84-ish grayscale frame: draws each of the 4 bar
-        rects from config.yaml's calibration section (scaled from their
-        native calibration.resolution down to ObservationConfig.frame_size)
-        as a horizontal bar whose filled width matches the corresponding
-        GameState field. Lets mock-mode preview images look positionally
-        consistent with what PixelStateReader would eventually capture from
-        a real game window, per the design spec's mock-image requirement."""
+        """合成的、大约 84x84 大小的灰度帧：把 config.yaml 的 calibration
+        部分中的 4 个血条 rect（从它们原生的 calibration.resolution 缩放
+        到 ObservationConfig.frame_size）绘制成水平色条，其填充宽度对应
+        相应的 GameState 字段。这样 mock 模式下的预览图像在视觉位置上
+        就能和 PixelStateReader 最终从真实游戏窗口截取到的图像保持一致，
+        符合设计文档里对 mock 图像的要求。"""
         obs_cfg = ObservationConfig.from_config()
         width, height = obs_cfg.frame_size
         frame = np.zeros((height, width), dtype=np.uint8)
@@ -603,15 +599,15 @@ Add this method to `class MockStateReader(StateReader)`, e.g. right after `read(
         return frame
 ```
 
-Add these module-level helpers near the bottom of `mock_reader.py`, alongside the existing `_clamp01`:
+把这些模块级辅助函数添加到 `mock_reader.py` 靠底部的位置，和现有的 `_clamp01` 放在一起：
 
 ```python
 def _scale_rect(
     rect: list[int], from_size: list[int], to_size: tuple[int, int]
 ) -> tuple[int, int, int, int]:
-    """Map a [x, y, w, h] pixel rect measured at `from_size` resolution onto
-    a `to_size` canvas, clamping width/height to at least 1px so a tiny
-    target canvas (e.g. 84x84) never produces a zero-area rect."""
+    """把一个在 `from_size` 分辨率下测得的 [x, y, w, h] 像素 rect
+    映射到 `to_size` 的画布上，宽/高至少钳制为 1px，这样一个很小的
+    目标画布（比如 84x84）永远不会产生面积为零的 rect。"""
     x, y, w, h = rect
     from_w, from_h = from_size
     to_w, to_h = to_size
@@ -625,17 +621,17 @@ def _scale_rect(
     )
 ```
 
-- [ ] **Step 6: Run test to verify it passes**
+- [ ] **步骤 6：运行测试确认它通过**
 
-Run: `python tests/test_mock_frame.py`
-Expected: `All 2 MockStateReader.read_frame() tests PASSED.`
+运行：`python tests/test_mock_frame.py`
+预期：`All 2 MockStateReader.read_frame() tests PASSED.`
 
-- [ ] **Step 7: Generate and visually inspect preview frames**
+- [ ] **步骤 7：生成并肉眼检查预览帧**
 
-Run: `python tests/test_mock_frame.py --save-frames 8`
-Expected: log line `Saved 8 mock frames to <path>\logs\frame_preview`, and 8 PNG files exist there. Open a couple in an image viewer -- confirm 4 short bright horizontal bar segments appear roughly where the HP/posture bars sit in `GAME_PIC/BOSS.png` (bottom-left, bottom-center, top-left, top-center), against a black background, and that the segments visibly change length across the 8 frames as the scripted trajectory advances.
+运行：`python tests/test_mock_frame.py --save-frames 8`
+预期：日志行 `Saved 8 mock frames to <path>\logs\frame_preview`，且该目录下存在 8 个 PNG 文件。用图片查看器打开其中几张——确认出现了 4 段短的亮色水平条，大致位于 `GAME_PIC/BOSS.png` 中 HP/架势条所在的位置（左下、中下、左上、中上），背景为黑色，并且这些色条的长度随着这 8 帧、脚本化轨迹的推进而明显变化。
 
-- [ ] **Step 8: Commit**
+- [ ] **步骤 8：提交**
 
 ```bash
 git add sekiro_ai/state_reader/base.py sekiro_ai/state_reader/mock_reader.py tests/test_restart.py tests/test_mock_frame.py
@@ -644,29 +640,29 @@ git commit -m "feat: add read_frame() to StateReader; mock synthetic bar renderi
 
 ---
 
-### Task 4: `PixelStateReader.read_frame()` and `read()` implementation
+### 任务 4：`PixelStateReader.read_frame()` 和 `read()` 实现
 
-**Files:**
-- Modify: `sekiro_ai/state_reader/pixel_reader.py`
-- Modify: `config/config.yaml` (add `posture_color_hsv_range`, already done in Task 2 -- this task only *consumes* it)
-- Test: `tests/test_pixel_bar_extraction.py`
+**文件：**
+- 修改：`sekiro_ai/state_reader/pixel_reader.py`
+- 修改：`config/config.yaml`（添加 `posture_color_hsv_range`，已经在任务 2 中完成——本任务只是*使用*它）
+- 测试：`tests/test_pixel_bar_extraction.py`
 
-**Interfaces:**
-- Consumes: `ObservationConfig.from_config()` (Task 2). `calibration.player_hp_bar`/`boss_hp_bar`/`player_posture_bar`/`boss_posture_bar`/`resolution`/`hp_color_hsv_range`/`posture_color_hsv_range` from `config.yaml` (all pre-existing except `posture_color_hsv_range`, added in Task 2).
-- Produces: `PixelStateReader.read_frame(self) -> np.ndarray` (whole-window capture, grayscale, resized to `ObservationConfig.frame_size`) and a working `PixelStateReader.read(self) -> GameState` that fills `player_hp`, `boss_hp`, `player_posture`, `boss_posture`, `player_dead`, `boss_dead` from bar-rect HSV fill ratios (everything else in `GameState` stays at its dataclass default, per the design spec's explicit scope exclusions for `boss_action`/`player_pos`/`boss_pos`/`distance`/`can_parry`/`player_hit`). Also produces two importable helpers other code/tests can call directly: `bar_fill_ratio(bgr_image: np.ndarray, rect: tuple[int,int,int,int], hsv_range: tuple) -> float` and `capture_client_area(window) -> np.ndarray` (BGR ndarray).
+**接口：**
+- 依赖：`ObservationConfig.from_config()`（任务 2）。`config.yaml` 中的 `calibration.player_hp_bar`/`boss_hp_bar`/`player_posture_bar`/`boss_posture_bar`/`resolution`/`hp_color_hsv_range`/`posture_color_hsv_range`（除 `posture_color_hsv_range`（任务 2 新增）外均为已有字段）。
+- 产出：`PixelStateReader.read_frame(self) -> np.ndarray`（整窗口截图、灰度化、resize 到 `ObservationConfig.frame_size`），以及一个能真正工作的 `PixelStateReader.read(self) -> GameState`，它根据 bar-rect 的 HSV 填充比例填充 `player_hp`、`boss_hp`、`player_posture`、`boss_posture`、`player_dead`、`boss_dead`（`GameState` 中的其他字段保持其数据类默认值，符合设计文档中对 `boss_action`/`player_pos`/`boss_pos`/`distance`/`can_parry`/`player_hit` 的明确范围排除）。同时产出两个可供其他代码/测试直接导入调用的辅助函数：`bar_fill_ratio(bgr_image: np.ndarray, rect: tuple[int,int,int,int], hsv_range: tuple) -> float` 和 `capture_client_area(window) -> np.ndarray`（BGR ndarray）。
 
-This task cannot be exercised against a real game window (none is running during implementation) -- it's tested against the two static screenshots already in the repo, `GAME_PIC/BOSS.png` (boss engaged, mid-fight bar levels) and `GAME_PIC/WITHOUT_BOSS.png` (player at rest, high HP, empty posture bars), by feeding them in as a substitute for a live `mss` capture. This validates the HSV-threshold and fill-ratio math is correct; it does NOT validate real capture timing/`mss`/window-finding against a live game, which per the design spec's scope boundary remains a manual step for later (documented in `docs/live_game.md`, unchanged by this task).
+本任务在实现期间无法对着真实游戏窗口验证（因为开发期间没有游戏在运行）——它是对着仓库里已有的两张静态截图测试的，`GAME_PIC/BOSS.png`（boss 交战中，战斗中期的血条水平）和 `GAME_PIC/WITHOUT_BOSS.png`（玩家处于非战斗状态，高 HP，架势条为空），把它们当作 `mss` 实时截图的替代品喂进去。这能验证 HSV 阈值和填充比例的数学计算是正确的；但**不能**验证真实截图时机/`mss`/窗口查找相对于真实游戏的正确性，依据设计文档的范围边界，这部分留作以后的手动步骤（记录在 `docs/live_game.md` 中，本任务不改动该文档）。
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **步骤 1：编写会失败的测试**
 
 ```python
-"""Standalone test for PixelStateReader's bar-fill-ratio extraction math,
-run against the two static screenshots already checked into GAME_PIC/ (no
-live game window available during development -- see
-docs/superpowers/specs/2026-08-02-pixel-frame-observation-design.md's scope
-notes on what this can and can't validate).
+"""PixelStateReader 血条填充比例提取数学计算的独立测试脚本，针对已经
+提交到 GAME_PIC/ 目录下的两张静态截图运行（开发期间没有真实游戏窗口可用——
+关于这个测试能验证什么、不能验证什么，参见
+docs/superpowers/specs/2026-08-02-pixel-frame-observation-design.md
+的范围说明）。
 
-Usage:
+用法：
     python tests/test_pixel_bar_extraction.py
 """
 from __future__ import annotations
@@ -688,8 +684,8 @@ GAME_PIC_DIR = Path(__file__).resolve().parent.parent / "GAME_PIC"
 HP_HSV_RANGE = ([0, 100, 90], [10, 255, 255])
 POSTURE_HSV_RANGE = ([15, 80, 80], [35, 255, 255])
 
-# Rects copied from config/config.yaml's calibration section (measured
-# against GAME_PIC/BOSS.png, a 1280x720 screenshot).
+# 这些 rect 是从 config/config.yaml 的 calibration 部分复制过来的
+# （对着 GAME_PIC/BOSS.png，一张 1280x720 的截图测量得到）。
 PLAYER_HP_BAR = (70, 647, 184, 15)
 PLAYER_POSTURE_BAR = (507, 617, 266, 14)
 BOSS_HP_BAR = (71, 60, 279, 14)
@@ -712,9 +708,8 @@ def test_boss_hp_bar_mostly_full_in_boss_screenshot() -> bool:
 
 
 def test_boss_hp_bar_near_empty_without_boss_engaged() -> bool:
-    """WITHOUT_BOSS.png has no boss HP bar rendered at all (no boss engaged)
-    -- the rect should read near-zero fill since there's no red bar-fill
-    color present there."""
+    """WITHOUT_BOSS.png 里完全没有渲染 boss HP 条（没有 boss 交战）——
+    该 rect 应该读出接近零的填充比例，因为那里根本没有红色的血条填充色。"""
     img = load_image("WITHOUT_BOSS.png")
     ratio = bar_fill_ratio(img, BOSS_HP_BAR, HP_HSV_RANGE)
     ok = ratio < 0.1
@@ -766,22 +761,21 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **步骤 2：运行测试确认它会失败**
 
-Run: `python tests/test_pixel_bar_extraction.py`
-Expected: `ImportError: cannot import name 'bar_fill_ratio' from 'sekiro_ai.state_reader.pixel_reader'`
+运行：`python tests/test_pixel_bar_extraction.py`
+预期：`ImportError: cannot import name 'bar_fill_ratio' from 'sekiro_ai.state_reader.pixel_reader'`
 
-- [ ] **Step 3: Implement `bar_fill_ratio`, `capture_client_area`, `read()`, and `read_frame()` in `pixel_reader.py`**
+- [ ] **步骤 3：在 `pixel_reader.py` 中实现 `bar_fill_ratio`、`capture_client_area`、`read()` 和 `read_frame()`**
 
-Replace the whole `read()` method and add new helpers. The module keeps its existing lazy-import convention (`cv2`/`mss` imported inside functions, never at module top).
+替换整个 `read()` 方法，并添加新的辅助函数。这个模块保持其现有的惰性导入约定（`cv2`/`mss` 在函数内部导入，绝不在模块顶层）。
 
 ```python
 def bar_fill_ratio(bgr_image, rect: tuple[int, int, int, int], hsv_range) -> float:
-    """Fraction of `rect`'s width that has at least one pixel matching
-    `hsv_range` (an OpenCV-HSV [[H,S,V]min, [H,S,V]max] pair) somewhere in
-    its height -- a horizontal-bar-fill estimate that's robust to the bar's
-    fill color varying slightly in brightness/shading (only requires ONE
-    matching pixel per column, not the whole column)."""
+    """`rect` 的宽度中，在其高度范围内至少有一个像素匹配 `hsv_range`
+    （一对 OpenCV-HSV 的 [[H,S,V]min, [H,S,V]max]）的比例——这是一种
+    对水平血条填充比例的估算方式，对血条填充色在亮度/明暗上的轻微变化
+    比较鲁棒（每一列只需要有一个匹配的像素，不要求整列都匹配）。"""
     import cv2
     import numpy as np
 
@@ -797,9 +791,9 @@ def bar_fill_ratio(bgr_image, rect: tuple[int, int, int, int], hsv_range) -> flo
 
 
 def capture_client_area(window):
-    """Screenshot of `window`'s client area (excludes title bar/border) as a
-    BGR ndarray, using the window's current on-screen position (via
-    win32gui.ClientToScreen) and size (via win32gui.GetClientRect)."""
+    """截取 `window` 客户区（不包括标题栏/边框）的截图，返回 BGR
+    ndarray，使用该窗口当前在屏幕上的位置（通过 win32gui.ClientToScreen）
+    和尺寸（通过 win32gui.GetClientRect）。"""
     import cv2
     import mss
     import numpy as np
@@ -816,7 +810,7 @@ def capture_client_area(window):
     return cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
 ```
 
-Replace the existing `read()` method body (currently always raising `NotImplementedError`, `pixel_reader.py:83-102`) with:
+把现有的 `read()` 方法体（目前一直抛出 `NotImplementedError`，见 `pixel_reader.py:83-102`）替换为：
 
 ```python
     def read(self) -> GameState:
@@ -867,7 +861,7 @@ Replace the existing `read()` method body (currently always raising `NotImplemen
         return cv2.resize(gray, obs_cfg.frame_size, interpolation=cv2.INTER_AREA)
 ```
 
-Add the two new imports at the top of `pixel_reader.py` (alongside the existing `from ..utils.config_loader import load_config`):
+在 `pixel_reader.py` 顶部添加两个新的导入（和现有的 `from ..utils.config_loader import load_config` 放在一起）：
 
 ```python
 import time
@@ -877,16 +871,16 @@ import numpy as np
 from .observation_config import ObservationConfig
 ```
 
-Note: `read_frame()` deliberately does NOT check `missing_calibration()` -- it only needs the window to exist, not the bar-rect calibration, matching the design spec's error-handling section ("即使 HP 校准没填,图像分支也能跑").
+注意：`read_frame()` 故意**不**检查 `missing_calibration()`——它只需要窗口存在，不需要 bar-rect 校准，这和设计文档的错误处理小节一致（"即使 HP 校准没填，图像分支也能跑"）。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **步骤 4：运行测试确认它通过**
 
-Run: `python tests/test_pixel_bar_extraction.py`
-Expected: `All 5 bar extraction tests PASSED.`
+运行：`python tests/test_pixel_bar_extraction.py`
+预期：`All 5 bar extraction tests PASSED.`
 
-If any HSV-range assertion fails, adjust `HP_HSV_RANGE`/`POSTURE_HSV_RANGE` in the test (and the matching `hp_color_hsv_range`/`posture_color_hsv_range` defaults in `pixel_reader.py` and `config/config.yaml`) based on what the actual pixel values in `GAME_PIC/BOSS.png`/`GAME_PIC/WITHOUT_BOSS.png` are -- inspect with `cv2.cvtColor(cv2.imread(...), cv2.COLOR_BGR2HSV)` on the specific rect region to find the real range, rather than guessing blindly.
+如果任何 HSV 范围断言失败，根据 `GAME_PIC/BOSS.png`/`GAME_PIC/WITHOUT_BOSS.png` 中实际的像素值来调整测试里的 `HP_HSV_RANGE`/`POSTURE_HSV_RANGE`（以及 `pixel_reader.py` 和 `config/config.yaml` 中相应的 `hp_color_hsv_range`/`posture_color_hsv_range` 默认值）——用 `cv2.cvtColor(cv2.imread(...), cv2.COLOR_BGR2HSV)` 检查具体 rect 区域来找出真实的范围，而不是盲目猜测。
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add sekiro_ai/state_reader/pixel_reader.py tests/test_pixel_bar_extraction.py
@@ -895,20 +889,20 @@ git commit -m "feat: implement PixelStateReader.read() bar extraction and read_f
 
 ---
 
-### Task 5: `SekiroEnv` image observation space
+### 任务 5：`SekiroEnv` 图像观测空间
 
-**Files:**
-- Modify: `sekiro_ai/env/sekiro_env.py`
-- Modify: `sekiro_ai/env/__init__.py`
-- Modify: `tests/test_env.py`
+**文件：**
+- 修改：`sekiro_ai/env/sekiro_env.py`
+- 修改：`sekiro_ai/env/__init__.py`
+- 修改：`tests/test_env.py`
 
-**Interfaces:**
-- Consumes: `StateReader.read()`/`read_frame()` (Tasks 3-4), `FrameStack` (Task 1, `sekiro_ai/state_reader/frame_stack.py`'s `FrameStack(stack_size, frame_skip)` with `.reset(frame)`/`.push(frame)` both returning `(H, W, stack_size)` uint8 ndarrays), `ObservationConfig.from_config()` (Task 2).
-- Produces: `SekiroEnv.observation_space = spaces.Box(low=0, high=255, shape=(frame_size[1], frame_size[0], stack_size), dtype=np.uint8)`. Removes the `OBS_DIM` constant and `state_to_obs()` method entirely (no longer meaningful once observation is image-based) -- Task 6 depends on `OBS_DIM` no longer being imported anywhere.
+**接口：**
+- 依赖：`StateReader.read()`/`read_frame()`（任务 3-4）、`FrameStack`（任务 1，`sekiro_ai/state_reader/frame_stack.py` 的 `FrameStack(stack_size, frame_skip)`，其 `.reset(frame)`/`.push(frame)` 都返回 `(H, W, stack_size)` 的 uint8 ndarray）、`ObservationConfig.from_config()`（任务 2）。
+- 产出：`SekiroEnv.observation_space = spaces.Box(low=0, high=255, shape=(frame_size[1], frame_size[0], stack_size), dtype=np.uint8)`。彻底移除 `OBS_DIM` 常量和 `state_to_obs()` 方法（一旦观测变为图像型，它们就没有意义了）——任务 6 依赖于任何地方都不再导入 `OBS_DIM` 这一前提。
 
-- [ ] **Step 1: Update `tests/test_env.py`'s assertions for the new observation shape (failing test first)**
+- [ ] **步骤 1：先更新 `tests/test_env.py` 中针对新观测形状的断言（先写会失败的测试）**
 
-In `tests/test_env.py`, add this check inside `run_manual_episodes` right after `obs, info = env.reset(seed=seed)` (currently `tests/test_env.py:68`):
+在 `tests/test_env.py` 中，在 `run_manual_episodes` 内部、紧跟在 `obs, info = env.reset(seed=seed)` 之后（目前在 `tests/test_env.py:68`）添加这个检查：
 
 ```python
             expected_shape = env.observation_space.shape
@@ -919,16 +913,16 @@ In `tests/test_env.py`, add this check inside `run_manual_episodes` right after 
                 )
 ```
 
-Add `import numpy as np` to `tests/test_env.py`'s imports (currently missing since the old scalar-vector code never needed it directly in the test file).
+在 `tests/test_env.py` 的导入中添加 `import numpy as np`（目前缺失，因为旧的标量向量代码在测试文件里从未直接需要它）。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **步骤 2：运行测试确认它会失败**
 
-Run: `python tests/test_env.py --skip-check-env`
-Expected: fails or errors, since `SekiroEnv.observation_space` is still the old `Box(shape=(13,))` and `obs.shape` won't match an image shape expectation once Task 5's implementation changes are in (this step establishes the "before" baseline showing the old shape; if run before any code changes it will just pass trivially against the old 13-dim space, which is fine -- the meaningful failing-then-passing transition happens across Steps 2 and 4 as the implementation changes underneath it).
+运行：`python tests/test_env.py --skip-check-env`
+预期：失败或报错，因为此时 `SekiroEnv.observation_space` 还是旧的 `Box(shape=(13,))`，一旦任务 5 的实现改动落地，`obs.shape` 就不会再匹配图像形状的预期（这一步是在建立"改动前"的基线，展示旧的形状；如果在任何代码改动之前运行，它只会针对旧的 13 维空间平凡地通过，这也没问题——真正有意义的"先失败后通过"的转变发生在步骤 2 和步骤 4 之间，随着底层实现的改动而完成）。
 
-- [ ] **Step 3: Rewrite `sekiro_ai/env/sekiro_env.py`**
+- [ ] **步骤 3：重写 `sekiro_ai/env/sekiro_env.py`**
 
-Replace the file's imports, module docstring, `OBS_DIM`, `__init__`, `reset()`, `step()`, and `state_to_obs()`:
+替换该文件的导入、模块文档字符串、`OBS_DIM`、`__init__`、`reset()`、`step()` 和 `state_to_obs()`：
 
 ```python
 """Gymnasium Env wrapping StateReader + InputController + RewardCalculator +
@@ -1043,9 +1037,9 @@ class SekiroEnv(gym.Env):
         self.reader.close()
 ```
 
-Note this removes the `max_distance` constructor parameter entirely along with `state_to_obs()` -- `distance_norm` was only ever used to build the old scalar observation vector, which no longer exists. `GameState.distance` is unused by the new pipeline (per the design spec's scope exclusions).
+请注意这个改动彻底移除了构造函数参数 `max_distance`，也一并移除了 `state_to_obs()`——`distance_norm` 以前只用于构建旧的标量观测向量，而这个向量已经不存在了。`GameState.distance` 在新的管线中不再被使用（符合设计文档的范围排除）。
 
-- [ ] **Step 4: Update `sekiro_ai/env/__init__.py`**
+- [ ] **步骤 4：更新 `sekiro_ai/env/__init__.py`**
 
 ```python
 from .factory import build_env, build_reader
@@ -1054,16 +1048,16 @@ from .sekiro_env import SekiroEnv
 __all__ = ["SekiroEnv", "build_env", "build_reader"]
 ```
 
-(Drops `OBS_DIM` from both the import and `__all__` since `sekiro_env.py` no longer defines it.)
+（从导入和 `__all__` 中都去掉了 `OBS_DIM`，因为 `sekiro_env.py` 已经不再定义它。）
 
-- [ ] **Step 5: Run test to verify it passes**
+- [ ] **步骤 5：运行测试确认它通过**
 
-Run: `python tests/test_env.py`
-Expected: `gymnasium check_env PASSED.` and `All ... FrameStack tests PASSED`-style manual episode logs with no `FAIL` lines; `obs.shape` logged for each episode reset should equal `(84, 84, 4)` (or whatever `config.yaml`'s `observation` section currently specifies).
+运行：`python tests/test_env.py`
+预期：`gymnasium check_env PASSED.`，以及类似 `All ... FrameStack tests PASSED` 风格的手动 episode 日志，没有任何 `FAIL` 行；每次 episode reset 时记录的 `obs.shape` 应该等于 `(84, 84, 4)`（或者 `config.yaml` 的 `observation` 部分当前指定的任何值）。
 
-If `check_env` raises a new (not the pre-existing, already-expected timestamp-determinism) assertion about the image space's bounds/dtype, verify `observation_space`'s `low=0, high=255, dtype=np.uint8` matches exactly what `MockStateReader.read_frame()` / `FrameStack` actually produce -- `check_env` is strict about this for `Box` spaces.
+如果 `check_env` 针对图像空间的边界/dtype 抛出一个新的（不是既有的、已经预期到的时间戳确定性）断言错误，验证 `observation_space` 的 `low=0, high=255, dtype=np.uint8` 是否与 `MockStateReader.read_frame()` / `FrameStack` 实际产出的完全一致——`check_env` 对 `Box` 空间这方面的检查是很严格的。
 
-- [ ] **Step 6: Commit**
+- [ ] **步骤 6：提交**
 
 ```bash
 git add sekiro_ai/env/sekiro_env.py sekiro_ai/env/__init__.py tests/test_env.py
@@ -1072,18 +1066,18 @@ git commit -m "feat: switch SekiroEnv observation_space to stacked grayscale ima
 
 ---
 
-### Task 6: `--save-frames` PNG export in `tests/test_state_reader.py`
+### 任务 6：在 `tests/test_state_reader.py` 中添加 `--save-frames` PNG 导出功能
 
-**Files:**
-- Modify: `tests/test_state_reader.py`
+**文件：**
+- 修改：`tests/test_state_reader.py`
 
-**Interfaces:**
-- Consumes: `StateReader.read_frame()` (Tasks 3-4), works against whichever reader `build_reader()` returns (mock or, if `--live` finds a window, `PixelStateReader`).
-- Produces: a `--save-frames N` CLI flag that dumps the last N captured frames as PNGs to `logs/frame_preview/`, for the user's own visual sanity-checking (per the design spec's explicit request: "测试文件中最好有直接显示mock生成图像的，方便你测试").
+**接口：**
+- 依赖：`StateReader.read_frame()`（任务 3-4），针对 `build_reader()` 返回的任意 reader 工作（mock，或者如果 `--live` 找到了窗口，则是 `PixelStateReader`）。
+- 产出：一个 `--save-frames N` 的命令行参数，把最近 N 次捕获的帧导出为 PNG 保存到 `logs/frame_preview/`，供用户自行进行肉眼合理性检查（依据设计文档的明确要求："测试文件中最好有直接显示mock生成图像的，方便你测试"）。
 
-- [ ] **Step 1: Add the flag and export logic**
+- [ ] **步骤 1：添加该参数和导出逻辑**
 
-In `tests/test_state_reader.py`, add near the top (after the existing imports):
+在 `tests/test_state_reader.py` 中，在现有导入之后靠近顶部的位置添加：
 
 ```python
 import shutil
@@ -1091,7 +1085,7 @@ import shutil
 FRAME_PREVIEW_DIR = Path(__file__).resolve().parent.parent / "logs" / "frame_preview"
 ```
 
-Add a new function, and call it from `main()`:
+添加一个新函数，并在 `main()` 中调用它：
 
 ```python
 def save_frame_previews(reader, n: int) -> None:
@@ -1108,25 +1102,25 @@ def save_frame_previews(reader, n: int) -> None:
     logger.info("Saved %d frame(s) to %s", n, FRAME_PREVIEW_DIR)
 ```
 
-In `main()`, add the argparse flag:
+在 `main()` 中添加这个 argparse 参数：
 
 ```python
     parser.add_argument("--save-frames", type=int, default=0, help="Save N read_frame() outputs as PNGs to logs/frame_preview/ for visual inspection.")
 ```
 
-And call it right before the existing `try:`/`for i in range(args.steps):` loop (so it runs once per invocation, using whichever reader `build_reader()` already picked):
+并在现有的 `try:`/`for i in range(args.steps):` 循环之前调用它（这样它在每次运行时只会执行一次，使用 `build_reader()` 已经选好的那个 reader）：
 
 ```python
     if args.save_frames > 0:
         save_frame_previews(reader, args.save_frames)
 ```
 
-- [ ] **Step 2: Run and inspect**
+- [ ] **步骤 2：运行并检查**
 
-Run: `python tests/test_state_reader.py --save-frames 5`
-Expected: log line `Saved 5 frame(s) to <path>\logs\frame_preview`, and 5 PNGs exist there afterward. Open one -- should look like Task 3's mock bar-graphic preview (or, if run with `--live` against a real game window, an actual downscaled grayscale game screenshot).
+运行：`python tests/test_state_reader.py --save-frames 5`
+预期：日志行 `Saved 5 frame(s) to <path>\logs\frame_preview`，此后该目录下存在 5 个 PNG 文件。打开其中一个——应该看起来和任务 3 的 mock 血条图预览类似（或者，如果加 `--live` 对着真实游戏窗口运行，则是一张真实的、经过降采样的灰度游戏截图）。
 
-- [ ] **Step 3: Commit**
+- [ ] **步骤 3：提交**
 
 ```bash
 git add tests/test_state_reader.py
@@ -1135,49 +1129,49 @@ git commit -m "feat: add --save-frames PNG export to test_state_reader.py"
 
 ---
 
-### Task 7: Switch PPO policy to `CnnPolicy`; update docs
+### 任务 7：把 PPO 的 policy 切换为 `CnnPolicy`；更新文档
 
-**Files:**
-- Modify: `train.py:65`
-- Modify: `docs/architecture.md` (section 6's "RL 算法" bullet, and directory-structure header comment referencing scalar state)
-- Modify: `docs/installation.md` (CUDA/CPU note referencing "13维向量,不是图像")
-- Modify: `docs/training.md` (`policy="MlpPolicy"` step description)
-- Modify: `docs/configuration.md` (already updated in Task 2 for the `observation`/`posture_color_hsv_range` fields; this task only touches prose describing the observation shape elsewhere in the file, if any)
+**文件：**
+- 修改：`train.py:65`
+- 修改：`docs/architecture.md`（第 6 节的"RL 算法"要点，以及引用标量状态的目录结构头部注释）
+- 修改：`docs/installation.md`（引用"13维向量,不是图像"的 CUDA/CPU 说明）
+- 修改：`docs/training.md`（`policy="MlpPolicy"` 那一步的描述）
+- 修改：`docs/configuration.md`（已在任务 2 中为 `observation`/`posture_color_hsv_range` 字段更新过；本任务只涉及文件中其他地方描述观测形状的文字，如果有的话）
 
-**Interfaces:**
-- Consumes: nothing new -- this task is a policy-string change plus documentation, using the `observation_space` already wired up in Task 5.
-- Produces: `train.py` builds `PPO("CnnPolicy", ...)` instead of `PPO("MlpPolicy", ...)`, so `stable_baselines3` picks its default Atari-style CNN feature extractor (`NatureCNN`) matching an `(84,84,4)` uint8 image `Box` space. `play.py` needs no change -- `PPO.load()` restores the policy architecture from the saved model, so it only ever needs to know a model path, not a policy string (confirmed: `play.py` does not construct `PPO(...)` directly, only calls `PPO.load(args.model, env=env)`, so nothing in `play.py` currently hardcodes `MlpPolicy`/`CnnPolicy`).
+**接口：**
+- 依赖：无新增内容——本任务是一个 policy 字符串的改动加文档更新，使用的是任务 5 中已经接好的 `observation_space`。
+- 产出：`train.py` 构建 `PPO("CnnPolicy", ...)` 而不是 `PPO("MlpPolicy", ...)`，这样 `stable_baselines3` 就会选用它默认的 Atari 风格 CNN 特征提取器（`NatureCNN`），匹配一个 `(84,84,4)` uint8 图像 `Box` 空间。`play.py` 不需要任何改动——`PPO.load()` 会从保存的模型中恢复 policy 架构，所以它只需要知道模型路径，不需要知道 policy 字符串（已确认：`play.py` 不会直接构造 `PPO(...)`，只调用 `PPO.load(args.model, env=env)`，所以 `play.py` 中目前没有任何地方硬编码 `MlpPolicy`/`CnnPolicy`）。
 
-- [ ] **Step 1: Change `train.py`'s policy string**
+- [ ] **步骤 1：修改 `train.py` 的 policy 字符串**
 
-In `train.py:65`, change:
+在 `train.py:65` 中，把：
 
 ```python
         model = PPO("MlpPolicy", env, verbose=1, seed=args.seed, tensorboard_log=str(TENSORBOARD_DIR))
 ```
 
-to:
+改为：
 
 ```python
         model = PPO("CnnPolicy", env, verbose=1, seed=args.seed, tensorboard_log=str(TENSORBOARD_DIR))
 ```
 
-- [ ] **Step 2: Run the mock training smoke test**
+- [ ] **步骤 2：运行 mock 训练冒烟测试**
 
-Run: `python train.py --total-timesteps 1000 --run-name pixel_obs_smoke_test`
-Expected: runs to completion without error, logs `Model saved to models/pixel_obs_smoke_test.zip`. SB3 will print `Using cpu device` and construct its default CNN feature extractor for the image observation space -- no manual policy_kwargs needed for this default architecture.
+运行：`python train.py --total-timesteps 1000 --run-name pixel_obs_smoke_test`
+预期：无错误地跑完全程，日志输出 `Model saved to models/pixel_obs_smoke_test.zip`。SB3 会打印 `Using cpu device`，并为图像观测空间构建它默认的 CNN 特征提取器——这个默认架构不需要手动传 policy_kwargs。
 
-- [ ] **Step 3: Update documentation to match the new observation pipeline**
+- [ ] **步骤 3：更新文档以匹配新的观测管线**
 
-In `docs/architecture.md`:
-- Update section 2 ("统一状态格式") to add a note that `GameState` is now only used for reward/restart, not the agent's observation (which is the stacked grayscale image described in the new `docs/configuration.md` `observation` section from Task 2).
-- Update section 6's bullet `**RL 算法**：stable-baselines3 的 PPO，policy="MlpPolicy"（状态是低维向量，不需要 CNN）。` to describe `policy="CnnPolicy"` and the `(84,84,stack_size)` uint8 image observation instead.
+在 `docs/architecture.md` 中：
+- 更新第 2 节（"统一状态格式"），加一条说明：`GameState` 现在只用于 reward/restart，不再是 agent 的观测（观测是任务 2 中 `docs/configuration.md` 新增的 `observation` 部分所描述的堆叠灰度图像）。
+- 更新第 6 节的要点 `**RL 算法**：stable-baselines3 的 PPO，policy="MlpPolicy"（状态是低维向量，不需要 CNN）。`，改为描述 `policy="CnnPolicy"` 和 `(84,84,stack_size)` 的 uint8 图像观测。
 
-In `docs/installation.md`, update the line `不需要提前安装 CUDA/GPU 相关依赖，stable-baselines3 的 MlpPolicy 在 CPU 上跑训练完全够用（状态是13维向量，不是图像，不需要卷积网络）。` to reflect that observations are now images processed by a CNN, but CPU training is still fine for this project's short episodes/small image size (no GPU requirement introduced, just note the change from vector to image).
+在 `docs/installation.md` 中，更新这一行：`不需要提前安装 CUDA/GPU 相关依赖，stable-baselines3 的 MlpPolicy 在 CPU 上跑训练完全够用（状态是13维向量，不是图像，不需要卷积网络）。`，改为体现观测现在是经 CNN 处理的图像，但对于本项目较短的 episode/较小的图像尺寸，CPU 训练依然完全够用（不引入 GPU 需求，只需说明从向量到图像的变化）。
 
-In `docs/training.md`, update step 3 of "训练过程中发生了什么" (currently `创建（或加载）PPO模型，policy="MlpPolicy"（状态是低维数值向量，不需要卷积网络处理图像）。`) to say `policy="CnnPolicy"` and describe the image observation.
+在 `docs/training.md` 中，更新"训练过程中发生了什么"的第 3 步（目前是 `创建（或加载）PPO模型，policy="MlpPolicy"（状态是低维数值向量，不需要卷积网络处理图像）。`），改为 `policy="CnnPolicy"` 并描述图像观测。
 
-- [ ] **Step 4: Commit**
+- [ ] **步骤 4：提交**
 
 ```bash
 git add train.py docs/architecture.md docs/installation.md docs/training.md
@@ -1186,9 +1180,9 @@ git commit -m "feat: switch training to CnnPolicy for image observations; update
 
 ---
 
-## Final Verification
+## 最终验证
 
-After all 7 tasks are complete, run the full mock-mode test suite in order (per `docs/installation.md`'s "验证安装" checklist, updated for this plan's new/changed test files) to confirm nothing regressed:
+在全部 7 个任务完成之后，按顺序运行完整的 mock 模式测试套件（依据 `docs/installation.md` 中"验证安装"清单，针对本计划新增/改动的测试文件做了更新），确认没有出现回归：
 
 ```powershell
 python tests/test_frame_stack.py
@@ -1204,5 +1198,5 @@ python tests/test_random_agent.py
 python train.py --total-timesteps 1000 --run-name final_check
 ```
 
-Every script should finish with no unhandled traceback and no `[FAIL]`/`FAILED` log lines (the pre-existing, expected `check_env` timestamp-determinism warning in `test_env.py` is the one known exception, already handled by that test's own logic). This is the point at which the user's follow-up request -- a training visualization UI -- becomes a new, separate brainstorming topic, per this plan's explicit scope boundary.
+每个脚本都应该在没有未处理的 traceback、没有 `[FAIL]`/`FAILED` 日志行的情况下运行完毕（`test_env.py` 中既有的、已经预期到的 `check_env` 时间戳确定性警告是唯一已知例外，那个测试自身的逻辑已经处理了它）。到了这一步，用户的后续请求——训练可视化 UI——就会成为一个新的、独立的 brainstorming 话题，依据本计划明确的范围边界。
 
