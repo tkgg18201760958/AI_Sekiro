@@ -53,6 +53,10 @@ python tests/test_restart.py
 python tests/test_reward.py
 python tests/test_env.py
 python tests/test_random_agent.py
+python tests/test_frame_stack.py            # FrameStack 帧堆叠/frame_skip 逻辑
+python tests/test_observation_config.py     # ObservationConfig 读取 config.yaml 的 observation 配置
+python tests/test_mock_frame.py             # MockStateReader.read_frame() 合成血条画面
+python tests/test_pixel_bar_extraction.py   # PixelStateReader 血条/架势条提取，对着 GAME_PIC/ 静态截图跑，不需要打开游戏
 ```
 
 全部正常跑完（没有报错退出）说明环境没问题。接下来可以直接开始训练（见 [training.md](training.md)），或者先看 [configuration.md](configuration.md) 了解可调参数。

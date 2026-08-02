@@ -93,7 +93,7 @@ StateReader.read() -> state(t)
         ▼
 RewardCalculator.compute(state(t-1), state(t)) -> reward
         │
-SekiroEnv 组装 observation (state(t) 转成 np.array)
+SekiroEnv 组装 observation：reader.read_frame() 取得画面像素帧 -> FrameStack 堆叠成 (H, W, stack_size) 灰度帧堆栈（与 state(t) 无关，state(t) 只流向 reward 计算和下面的重开判断）
         │
         ▼
 PPO Agent.predict(observation) -> action (int)

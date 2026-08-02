@@ -111,6 +111,47 @@ python tests/test_random_agent.py --max-steps 500
 
 跑完会汇总打印每种模式下：完成的episode数、正常终止(`terminated`)数、被截断(`truncated`)数、崩溃(`crashed`)数、平均reward、平均步数。最后一行如果是 `PASS: no crashes across all modes/episodes.` 说明整条管线在mock环境下是稳的；如果有 `crashed`，日志里会有完整的异常堆栈，需要照着定位问题。
 
+## test_frame_stack.py —— 帧堆叠
+
+验证 `FrameStack`（把单帧画面按 `frame_skip` 间隔轮转堆叠成 `(H, W, stack_size)`）的逻辑对不对，纯数值断言，不依赖 mock/真实读取。
+
+```powershell
+python tests/test_frame_stack.py
+```
+
+覆盖的场景：`reset()` 后所有槽位都填成第一帧、`frame_skip` 间隔内的 `push()` 不改变堆栈、达到 `frame_skip` 间隔后新帧正确轮转进最后一个槽位、堆栈里最旧的帧在索引0、最新的帧在最后一个索引。
+
+## test_observation_config.py —— 观测配置
+
+验证 `ObservationConfig.from_config()` 从 `config.yaml` 的 `observation` 段读取 `frame_size`/`frame_skip`/`stack_size` 的默认值、覆盖、部分覆盖逻辑是否正确。
+
+```powershell
+python tests/test_observation_config.py
+```
+
+覆盖的场景：空配置时用默认值（`84x84`、`frame_skip=4`、`stack_size=4`）、配置齐全时全部按配置覆盖、只配置部分字段时其余字段仍保持默认值。
+
+## test_mock_frame.py —— 模拟画面生成
+
+验证 `MockStateReader.read_frame()` 合成的血条示意图像（灰度、按当前 mock 状态画出血条/架势条填充比例）是否符合预期，同样不需要打开游戏。
+
+```powershell
+python tests/test_mock_frame.py
+python tests/test_mock_frame.py --save-frames 5   # 同时导出 5 张 PNG 到 logs/frame_preview/，方便肉眼核对（类似 test_state_reader.py 的可视化思路）
+```
+
+覆盖的场景：`read_frame()` 输出的形状/数据类型是否是 `(84,84)` 的 `uint8`；把 `player_hp` 分别设成接近满和接近空两种状态，验证满血时画面里"亮"（已填充）像素的总量确实比空血时更多——用整体亮度总和当作"血条确实随 GameState 数值变化"的代理验证，不追求像素级精确断言。
+
+## test_pixel_bar_extraction.py —— 真实截图血条提取
+
+验证 `PixelStateReader` 的 `bar_fill_ratio`（HSV 颜色阈值 + 区域裁剪算填充比例）在两张已提交到 `GAME_PIC/` 目录的静态截图（`BOSS.png` 交战中、`WITHOUT_BOSS.png` 无 boss）上算出来的血条/架势条填充比例是否合理。**不需要真实游戏窗口**，直接读本地图片文件跑。
+
+```powershell
+python tests/test_pixel_bar_extraction.py
+```
+
+覆盖的场景：`BOSS.png` 里 boss 血条应接近满（交战中boss还没怎么掉血）、`WITHOUT_BOSS.png` 里根本没渲染 boss HUD 所以 boss 血条填充比例应接近 0、`WITHOUT_BOSS.png` 里玩家在静息状态血条应接近满、非战斗状态下双方架势条应接近空、`BOSS.png` 交战中 boss 架势条应偏高。这些 rect/HSV 阈值都是从 `config/config.yaml` 的 `calibration` 部分复制过来、针对 `GAME_PIC/BOSS.png`（1280x720）手工标定的数值，只验证提取算法本身对着已知画面算得对不对，不验证真实游戏窗口截图流程。
+
 ## 下一步
 
 测试脚本全部跑通之后，就可以开始正式训练了，见 [training.md](training.md)。如果要对接真实游戏，看 [live_game.md](live_game.md)。
