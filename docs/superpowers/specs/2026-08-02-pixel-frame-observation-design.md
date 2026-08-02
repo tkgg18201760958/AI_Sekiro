@@ -28,10 +28,12 @@
 
 ```
 真实模式（--live）:
-  PixelStateReader.read_frame()
-    -> mss 截取窗口客户区原始画面（一次截图）
-    -> 数值提取分支：按 calibration 的 4 个 bar rect 裁剪 + cv2.inRange HSV 掩膜 -> GameState(player_hp, boss_hp, player_posture, boss_posture, ...)
-    -> 图像提取分支：整帧 cv2.cvtColor 转灰度 + cv2.resize 到 84x84 -> uint8 ndarray (84,84)
+  PixelStateReader.read() 和 PixelStateReader.read_frame() 各自独立截图（各调用一次 mss grab），
+  互不共享缓存：
+    read() -> mss 截取窗口客户区 -> 按 calibration 的 4 个 bar rect 裁剪 + cv2.inRange HSV 掩膜
+              -> GameState(player_hp, boss_hp, player_posture, boss_posture, ...)
+    read_frame() -> mss 截取窗口客户区 -> cv2.cvtColor 转灰度 + cv2.resize 到 84x84
+              -> uint8 ndarray (84,84)
   FrameStack（新模块）：按 frame_skip 间隔采样,滑动窗口保留最近 stack_size 帧 -> (84,84,stack_size) ndarray
 
 Mock 模式:
@@ -51,7 +53,7 @@ SekiroEnv:
 
 关键设计点：
 - **`StateReader` 接口扩展**：新增抽象方法 `read_frame() -> np.ndarray`（返回单帧 84×84 灰度图,dtype uint8）。`MockStateReader`和`PixelStateReader`都必须实现。这保持了`SekiroEnv`不关心数据来源的既有设计原则（base.py 的开篇注释）。
-- **一次截图两用**：`PixelStateReader` 内部把 mss 截图和数值提取、图像缩放共享同一次截屏结果，避免每步截两次屏幕拖慢帧率。`read()`（数值）和`read_frame()`（图像）在真实实现中会共享一个"截一次、算两次"的内部缓存,通过每步开始时调用一次`_capture()`来实现,`read()`和`read_frame()`都读这个缓存。
+- **`read()` 和 `read_frame()` 各自独立截图，不共享缓存**：曾经考虑过"一次截图两用"的缓存优化，但 `RestartManager.run()`（`restart/restart_manager.py:88-124`）在死亡后会阻塞轮询反复调用 `reader.read()` 等待复活信号（`while ... state = self.reader.read()`），轮询间隔之间画面是持续变化的（等待 loading/动画）。如果 `read()` 复用一个截图缓存，轮询期间会一直拿到同一张过期截图，导致 `player_dead` 永远读不到新值、复活检测卡死直至超时。因此放弃共享缓存，`read()` 和 `read_frame()` 各自调用 mss 截一次新图；对小窗口截图通常只需几毫秒，性能代价可接受，正确性优先。
 - **FrameStack 是独立、可单测的模块**（`sekiro_ai/state_reader/frame_stack.py`），不依赖 StateReader，只接收单帧 ndarray,内部维护 deque 和帧计数器,决定何时因为 frame_skip 而重复上一帧还是采集新帧。
 - **配置新增**：`config.yaml` 新增 `observation` 顶层字段：
   ```yaml
@@ -67,9 +69,9 @@ SekiroEnv:
 ```
 step(action):
   controller.execute(action)
-  frame = reader.read_frame()       # 单帧 84x84 灰度图（原始或mock生成）
+  frame = reader.read_frame()       # 单帧 84x84 灰度图（原始或mock生成，独立截图）
   obs = self._frame_stack.push(frame)  # (84,84,stack_size)
-  state = reader.read()             # GameState，用于 reward/restart（可能复用同一次截图缓存）
+  state = reader.read()             # GameState，用于 reward/restart（独立截图，不与上面共享缓存）
   reward = reward_calculator.compute(prev_state, state)
   terminated = RestartManager.needs_restart(state)
   ...
@@ -97,3 +99,4 @@ step(action):
 
 1. `read_frame()` 作为 `StateReader` 接口的新增抽象方法（而不是可选方法）——`MockStateReader` 和 `PixelStateReader` 都必须实现，这是接口的破坏性变更（任何未来新增的 reader 实现都必须提供这个方法）。
 2. Mock 模式下的图像生成使用简单几何图形（矩形色块长度模拟血条百分比）而非纯随机噪声，代价是多写一点绘图代码,好处是训练冒烟测试时能看到"reward 变化"和"画面变化"有粗略对应关系,便于调试。
+3. `read()` 和 `read_frame()` 各自独立截图（不共享缓存），已确认：优先保证 `RestartManager` 轮询复活检测的正确性，接受每步多一次 mss 截图调用的性能开销。
