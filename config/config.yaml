@@ -36,27 +36,29 @@ controller:
 
 calibration:
   # Real-game pixel calibration (sekiro_ai.state_reader.pixel_reader).
-  # PixelStateReader.read() raises NotImplementedError until these are
-  # filled in against an actual running game window -- see
-  # docs/roadmap.md stage 8 and docs/risks.md for why this can't be done
-  # without the game open. Fields left null/empty are what remains manual:
-  #   1. Launch Sekiro at a known resolution (recommended: 1920x1080 borderless).
-  #   2. Screenshot the HUD and measure each bar's pixel rect relative to
-  #      the game window's client area: player_hp_bar, player_posture_bar,
-  #      boss_hp_bar, boss_posture_bar -> [x, y, width, height].
-  #   3. Sample the bar-fill color at both "full" and "empty" to get a
-  #      color threshold (HSV range) that OpenCV can mask reliably.
-  #   4. Capture a template crop of the "危" (perilous attack) icon for
-  #      cv2.matchTemplate-based boss_action detection.
-  # None of this is guessable from code; it must be measured against the
-  # live game and pasted in here.
-  resolution: null            # e.g. [1920, 1080]
-  player_hp_bar: null         # [x, y, width, height]
-  player_posture_bar: null
-  boss_hp_bar: null
-  boss_posture_bar: null
-  perilous_icon_template: null   # path to a saved template image, e.g. assets/perilous_icon.png
-  hp_color_hsv_range: null       # e.g. [[0, 120, 70], [10, 255, 255]]
+  # PixelStateReader.read() still raises NotImplementedError even with this
+  # section fully filled in -- see docs/live_game.md: the mss-capture +
+  # OpenCV bar-fill measurement pipeline itself hasn't been written yet.
+  #
+  # The four bar rects and hp_color_hsv_range below were measured from
+  # GAME_PIC/BOSS.png (a 1280x720 screenshot), so they're a starting point
+  # rather than a live-verified calibration:
+  #   - Re-measure resolution/rects if the game runs at a different
+  #     resolution or window scale than 1280x720.
+  #   - perilous_icon_template is still null: BOSS.png doesn't show a "危"
+  #     prompt, so a template crop still needs to be captured during an
+  #     actual perilous attack against a live game window.
+  #   - Once read() is implemented, confirm the rects actually track bar
+  #     drain/fill across real gameplay with
+  #     `tests/test_state_reader.py --live --steps 20` -- a single still
+  #     frame can't verify that.
+  resolution: [1280, 720]
+  player_hp_bar: [70, 647, 184, 15]       # bottom-left salmon/coral bar
+  player_posture_bar: [507, 617, 266, 14] # bottom-center yellow chevron bar (excludes the "<"/">" side markers)
+  boss_hp_bar: [71, 60, 279, 14]          # top-left dark red bar
+  boss_posture_bar: [580, 40, 119, 10]    # top-center yellow chevron bar (excludes the "<"/">" side markers)
+  perilous_icon_template: null   # path to a saved template image, e.g. assets/perilous_icon.png -- BOSS.png doesn't show a "危" prompt, so this still needs a screenshot taken during a perilous attack
+  hp_color_hsv_range: [[0, 100, 90], [10, 255, 255]]   # covers both the boss's dark red and the player's lighter salmon fill
 
 reward:
   # Weight name -> value. Missing entries fall back to
