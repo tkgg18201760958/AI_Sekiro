@@ -59,6 +59,7 @@ calibration:
   boss_posture_bar: null
   perilous_icon_template: null   # path to a saved template image, e.g. assets/perilous_icon.png
   hp_color_hsv_range: null       # e.g. [[0, 120, 70], [10, 255, 255]]
+  posture_color_hsv_range: [[15, 80, 80], [35, 255, 255]]   # e.g. 黄色箭头架势条填充色的 HSV 范围
 ```
 
 这一节是**唯一一个无法凭代码或经验预填、必须在游戏实际运行时手动测量**的配置。原因很直接：血条/架势条在屏幕上的像素位置、颜色，只有启动游戏截个图量一量才知道，没有游戏窗口时纯靠猜是不可靠的。
@@ -70,11 +71,36 @@ calibration:
 1. `resolution`：以固定分辨率启动游戏，填 `[宽, 高]`，比如 `[1920, 1080]`。之后如果换了分辨率/窗口大小，这里连同下面几个像素坐标都要重新量。
 2. `player_hp_bar` / `player_posture_bar` / `boss_hp_bar` / `boss_posture_bar`：四条血条/架势条相对游戏窗口客户区（不含标题栏/边框）的像素矩形，格式 `[x, y, width, height]`。
 3. `hp_color_hsv_range`：血条在"满"和"空"状态下取色，得到一组 HSV 阈值范围 `[[H_min, S_min, V_min], [H_max, S_max, V_max]]`，供 OpenCV 做颜色掩膜识别血条填充比例。
-4. `perilous_icon_template`：截一张只狼"危"字警示图标的图，存成图片文件，把文件路径填进来（比如 `assets/perilous_icon.png`），供模板匹配识别 boss 危险动作。
+4. `posture_color_hsv_range`：架势条（黄色箭头填充）的 HSV 阈值范围，取法跟 `hp_color_hsv_range` 一样，但要注意架势条的黄色要跟血条的红/橙色在 HSV 上区分开，避免同一个掩膜误把两条都识别进去。默认值 `[[15, 80, 80], [35, 255, 255]]` 是基于 `GAME_PIC/BOSS.png`/`GAME_PIC/WITHOUT_BOSS.png` 两张样例截图，用手动 `cv2.inRange` + 逐列填充比例检查估出来的——不是自动化测试验证的，因为规划阶段还没有真实游戏窗口可用；接入真实游戏时建议重新用你自己截的图核对一遍。
+5. `perilous_icon_template`：截一张只狼"危"字警示图标的图，存成图片文件，把文件路径填进来（比如 `assets/perilous_icon.png`），供模板匹配识别 boss 危险动作。
 
 `sekiro_ai/state_reader/pixel_reader.py` 里的 `PixelStateReader.missing_calibration()` 会检查 `player_hp_bar`/`player_posture_bar`/`boss_hp_bar`/`boss_posture_bar` 这四项是否都已填写（`hp_color_hsv_range`/`perilous_icon_template`/`resolution` 目前不参与这个检查，因为读取管线本身——mss截图+OpenCV颜色分析——还没实现，参见下方"当前实现状态"）。
 
 **当前实现状态**：即使把 `calibration` 全填满，`PixelStateReader.read()` 目前仍会抛 `NotImplementedError`——因为截图+颜色识别的具体处理逻辑（mss 截图、按矩形裁剪、HSV 掩膜、算填充比例）还没有写。也就是说 `calibration` 这一节和 `missing_calibration()` 检查，是"阶段8对接真实游戏"这件事目前唯一已经做好的部分（把需要标定什么、缺了什么讲清楚），实际的图像处理代码还是空的。如果你要接入真实游戏，这部分需要你自己在 `pixel_reader.py` 的 `read()` 里实现。
+
+## `observation` —— 像素帧观测形状
+
+```yaml
+observation:
+  frame_size: [84, 84]
+  frame_skip: 4
+  stack_size: 4
+```
+
+`sekiro_ai/state_reader/observation_config.py` 里的 `ObservationConfig.from_config()` 读取这一节，供 `MockStateReader`、`PixelStateReader`、`SekiroEnv` 三者共用，让它们对"喂给 PPO agent 的观测长什么样"达成一致，不用各自硬编码。三个字段都可选，缺的字段回退到下面的默认值：
+
+| 字段 | 默认值 | 含义 |
+|---|---|---|
+| `frame_size` | `[84, 84]` | 堆叠前单帧 resize 的目标尺寸 `[width, height]` |
+| `frame_skip` | `4` | 每隔 N 个环境步骤才采样一个新帧入栈，期间最近入栈的帧会重复 |
+| `stack_size` | `4` | 滑动窗口中保留的帧数；最终 observation 形状为 `(frame_size[1], frame_size[0], stack_size)` |
+
+调这两个参数会直接影响训练：
+
+- `frame_skip` 越大，堆栈内几帧之间的时间跨度越宽，越容易从静态帧里看出"动作方向"（比如 boss 是在举刀还是收刀），但采样密度变低，可能错过极短的判定窗口（比如弹刀时机）；调小则相反——帧之间几乎没差异，agent 更难从像素堆栈里推断出速度/趋势信息。
+- `stack_size` 越大，agent 能看到更长的历史，对连续动作的建模更准，但观测维度线性增加，会拖慢前向推理和训练速度，同时增大显存占用；调小则观测更省资源，但可能丢失判断"招式正在进行到哪一步"所需的上下文。
+
+改完这两个参数后，`FrameStack`（`sekiro_ai/state_reader/frame_stack.py`）产出的堆栈形状会跟着变，训练前建议确认 CNN 特征提取器的输入形状与之匹配。
 
 ## `reward.weights` —— 奖励权重
 
