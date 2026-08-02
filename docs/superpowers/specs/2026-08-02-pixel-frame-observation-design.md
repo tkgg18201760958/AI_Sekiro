@@ -36,7 +36,10 @@
 
 Mock 模式:
   MockStateReader 保持现有 GameState 数值轨迹（scripted/random）不变，
-  新增 render_frame() 方法：把当前 GameState 的 hp/posture 数值绘制成 84x84 简易几何图形（如色块长度模拟血条），
+  新增 render_frame() 方法：把当前 GameState 的 hp/posture 数值绘制成 84x84 简易几何图形（色块长度模拟血条填充比例），
+  绘制位置/尺寸从 config.yaml 的 calibration.player_hp_bar / boss_hp_bar / player_posture_bar / boss_posture_bar
+  四个 rect 按 calibration.resolution 缩放映射到 84x84 画布上得到（而非随意摆放），
+  这样 mock 图像里血条的视觉位置和真实截图的血条位置逻辑一致，方便后续对照真实模式调试。
   经同一个 FrameStack 逻辑堆叠。
 
 SekiroEnv:
@@ -88,6 +91,7 @@ step(action):
 - `tests/test_env.py` 更新 `check_env` 断言：`observation_space.shape == (84,84,stack_size)`,dtype uint8。
 - 现有 `tests/test_reward.py`/`tests/test_restart.py` 不受影响（它们只测 `GameState`，不测 observation）。
 - `train.py --total-timesteps 1000` 的 mock 冒烟测试需要能跑通并用 `CnnPolicy`。
+- **可视化验证**：`tests/test_state_reader.py` 新增 `--save-frames N` 参数：把最近 N 次 `read_frame()`/`render_frame()` 的输出用 `cv2.imwrite` 保存成 PNG 到 `logs/frame_preview/frame_XXX.png`（每次运行先清空该目录），运行结束打印保存路径，方便用户直接打开图片肉眼检查血条位置和灰度效果是否合理。
 
 ## 待用户审阅的关键假设
 
